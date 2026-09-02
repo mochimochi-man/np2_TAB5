@@ -1,0 +1,75 @@
+# np2kai i386c core as an ESP-IDF component. Its static .bss is routed to PSRAM
+# via linker.lf (needs CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y).
+set(NP2 ${CMAKE_CURRENT_SOURCE_DIR}/np2kai)
+
+file(GLOB NP2_SRCS
+    ${NP2}/i386c/*.c
+    ${NP2}/i386c/ia32/*.c
+    ${NP2}/i386c/ia32/instructions/*.c
+    ${NP2}/i386c/ia32/instructions/fpu/softfloat/*.c
+    ${NP2}/i386c/ia32/instructions/fpu/softfloat3/*.c
+    ${NP2}/i386c/ia32/instructions/mmx/*.c
+    ${NP2}/i386c/ia32/instructions/sse/*.c
+    ${NP2}/i386c/ia32/instructions/sse2/*.c
+    ${NP2}/i386c/ia32/instructions/sse3/*.c
+    ${NP2}/i386c/ia32/instructions/ssse3/*.c
+    ${NP2}/i386c/ia32/instructions/sse4/*.c
+    ${NP2}/i386c/ia32/instructions/sse4a/*.c
+    ${NP2}/io/*.c ${NP2}/io/pci/*.c
+    ${NP2}/mem/*.c ${NP2}/vram/*.c ${NP2}/fdd/*.c ${NP2}/font/*.c
+    ${NP2}/generic/*.c ${NP2}/lio/*.c ${NP2}/bios/*.c ${NP2}/cbus/*.c
+    ${NP2}/codecnv/*.c ${NP2}/common/*.c ${NP2}/trap/*.c
+    ${NP2}/sound/*.c ${NP2}/sound/getsnd/*.c ${NP2}/sound/mame/*.c ${NP2}/sound/vermouth/*.c
+    ${NP2}/diskimage/*.c ${NP2}/diskimage/fd/*.c ${NP2}/diskimage/cd/*.c
+    ${NP2}/sound/fmgen/*.cpp ${NP2}/sound/mamebsd/*.cpp
+)
+# fpu: only the 4 files the upstream build uses (exclude fpemul.c = unused dosbox variant)
+list(APPEND NP2_SRCS
+    ${NP2}/i386c/ia32/instructions/fpu/fpdummy.c
+    ${NP2}/i386c/ia32/instructions/fpu/fpemul_dosbox.c
+    ${NP2}/i386c/ia32/instructions/fpu/fpemul_dosbox2.c
+    ${NP2}/i386c/ia32/instructions/fpu/fpemul_softfloat.c
+    ${NP2}/i386c/ia32/instructions/fpu/fpemul_softfloat3.cpp)
+# root glue (debugsnapshot.c excluded: needs np2oscfg / not needed for boot)
+list(APPEND NP2_SRCS
+    ${NP2}/pccore.c ${NP2}/nevent.c ${NP2}/timing.c ${NP2}/calendar.c
+    ${NP2}/keystat.c ${NP2}/statsave.c ${NP2}/debugsub386.c)
+
+idf_component_register(
+    SRCS ${NP2_SRCS}
+    INCLUDE_DIRS
+        shim
+        ${NP2} ${NP2}/common ${NP2}/i386c ${NP2}/i386c/ia32
+        ${NP2}/i386c/ia32/instructions ${NP2}/io ${NP2}/io/pci ${NP2}/mem
+        ${NP2}/vram ${NP2}/fdd ${NP2}/font ${NP2}/generic
+        ${NP2}/sound ${NP2}/sound/fmgen ${NP2}/sound/mame ${NP2}/sound/vermouth ${NP2}/sound/getsnd
+        ${NP2}/codecnv ${NP2}/cbus ${NP2}/bios ${NP2}/lio ${NP2}/diskimage
+        ${NP2}/diskimage/fd ${NP2}/diskimage/cd ${NP2}/trap
+        ${NP2}/sdl ${NP2}/sdl/libretro ${NP2}/sdl/libretro/libretro-common/include
+    LDFRAGMENTS linker.lf
+)
+
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    __LIBRETRO__ NP2_ESP32 NP2KAI_GIT_TAG="esp32" NP2KAI_GIT_HASH="0000000"
+    BIOS_IO_EMULATION OSLANG_UTF8 OSLINEBREAK_LF
+    SUPPORT_8BPP SUPPORT_16BPP SUPPORT_24BPP SUPPORT_32BPP
+    SUPPORT_CRT15KHZ SUPPORT_FAST_MEMORYCHECK SUPPORT_FMGEN SUPPORT_GPIB
+    SUPPORT_HRTIMER SUPPORT_KAI_IMAGES SUPPORT_LARGE_HDD SUPPORT_NORMALDISP
+    SUPPORT_PC9861K SUPPORT_PX SUPPORT_RESUME SUPPORT_RS232C_FIFO SUPPORT_S98
+    SUPPORT_SCSI SUPPORT_SMPU98 SUPPORT_SOFTKBD=0 SUPPORT_SOUND_SB16
+    SUPPORT_STATSAVE=10 SUPPORT_UTF8 SUPPORT_V30EXT SUPPORT_V30ORIGINAL
+    SUPPORT_VPCVHD USE_MAME USE_MAME_BSD VAEG_FIX VERMOUTH_LIB
+    SUPPORT_DEBUGSS CPUCORE_IA32 IA32_PAGING_EACHSIZE IA32_REBOOT_ON_PANIC
+    SUPPORT_CRT31KHZ SUPPORT_PC9801_119 SUPPORT_PC9821 SUPPORT_IDEIO
+    SUPPORT_LARGE_MEMORY SUPPORT_FPU_DOSBOX2_COMPATIBLE SUPPORT_PEGC
+    SUPPORT_VGA_MODEX SUPPORT_GAMEPORT SUPPORT_IDEIO_48BIT SUPPORT_FPU_SOFTFLOAT3
+    USE_FPU USE_MMX USE_3DNOW USE_SSE USE_SSE2 USE_SSE3 USE_SSSE3
+    USE_SSE4_1 USE_SSE4_2 USE_SSE4A USE_TSC USE_FASTPAGING USE_VME SUPPORT_MEMDBG32
+)
+
+# Third-party core: suppress all warnings (-w) so IDF's -Werror can't fire, and
+# explicitly disable the GCC14 categories that default to hard errors.
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -w
+    -Wno-incompatible-pointer-types -Wno-int-conversion -Wno-implicit-function-declaration
+    -fno-strict-aliasing)

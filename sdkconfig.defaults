@@ -1,0 +1,160 @@
+# np2 espresso — M5Stack Tab5 (ESP32-P4) build configuration.
+#
+# Written from scratch rather than carried over from the ESP32-S3 forks: that
+# file was half S3-only knobs (CONFIG_SPIRAM_MODE_OCT, the ESP32S3_*_CACHE_*
+# sizes) and half a balancing act for a chip with 512KB of internal SRAM and a
+# Bluetooth controller competing for it. The P4 has neither problem — more
+# internal memory and no on-die radio — so most of that does not apply. The
+# original is kept beside this file as sdkconfig.defaults.s3ref.
+
+CONFIG_IDF_TARGET="esp32p4"
+
+# ---- PSRAM -----------------------------------------------------------------
+# np2kai's main memory array, the framebuffers and the audio ring all live here.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# 200MHz, not the 20MHz default. The DSI panel scans 720x1280 RGB565 out of
+# PSRAM at a 70MHz pixel clock — 140MB/s, sustained, forever — and anything
+# slower makes the driver report
+#     lcd.dsi.dpi: can't fetch data from external memory fast enough
+# and the panel never receives a complete frame: initialised, backlit, and
+# black. 80MHz was not enough either.
+#
+# SPIRAM_SPEED_200M is gated behind IDF_EXPERIMENTAL_FEATURES, so asking for it
+# without this line is silently ignored and the build falls back to 20MHz —
+# which is exactly what happened here for several rounds.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM_SPEED_200M=y
+# NOTE: CONFIG_SPIRAM_XIP_FROM_PSRAM looks attractive here (it would stop the
+# flash bus competing with the panel for the MSPI) but it rearranges the image
+# enough that .sdata from libstdc++ and the panel drivers can no longer be
+# placed, and the link fails. Left off.
+# Required by components/np2kai/linker.lf, which routes the whole core's static
+# .bss and .common into external RAM. Without it the linker discards ~6MB of
+# sections (mem[], the VRAM shadows, the FM state) and the link fails.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# ---- CPU and cache ---------------------------------------------------------
+# A wider L2 line moves more per PSRAM burst, which is what the panel's scanout
+# and the rotation blit both want. The cache SIZE is deliberately left at its
+# 128KB default: on the P4 the L2 is carved out of the same L2MEM the internal
+# heap comes from, and taking 512KB for cache left so little that the linker
+# could not place even libc's .bss.
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# ---- Flash -----------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---- Console ---------------------------------------------------------------
+# The P4 has a USB-Serial-JTAG unit of its own, separate from the USB-OTG
+# controller — unlike the S3, where handing OTG to USB Mode killed the console.
+# Here both can be live at the same time.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ---- FreeRTOS --------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+
+# ---- Board support ---------------------------------------------------------
+# dosio_sd.cpp opens every disk image through "/sd/...", so the BSP has to
+# mount the card there rather than at its own "/sdcard" default.
+CONFIG_BSP_SD_MOUNT_POINT="/sd"
+
+# ---- FATFS -----------------------------------------------------------------
+# Long file names on the heap, and the same code page the S3 forks use so disk
+# image names behave identically.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_CODEPAGE_932=y
+
+# ---- Compiler --------------------------------------------------------------
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# ---- Main task -------------------------------------------------------------
+# The emulator runs on its own task with a static stack; app_main only sets up.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ---- ESP32-P4 performance ---------------------------------------------------
+# (No CPU frequency line: ESP-IDF v5.5 offers only 360MHz for the ESP32-P4.)
+
+# The emulated 8086 address space lives in PSRAM and the i286c core touches it
+# on nearly every instruction, so the L2 cache is what this workload actually
+# runs on. Measured: 128KB -> 256KB is most of a 30% cut in the CPU loop. 512KB
+# does not link - the cache comes out of the same 768KB L2MEM as the internal
+# RAM, and there is not enough left. 64-byte lines measured worse than 128 on
+# both the CPU loop and the composite, so the line size below is deliberate.
+CONFIG_CACHE_L2_CACHE_256KB=y
+
+# assert() compiled out. IDF ships them at level 2 by default and np2kai's hot
+# paths have their share.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
+
+# Code executes from flash through the cache, so the fetch width matters.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# ---- Bluetooth via the companion ESP32-C6 (ESP-Hosted 2.x over SDIO) --------
+# The Tab5 is a board esp_hosted already knows, so the SDIO pins come from its
+# own board definition. The reset polarity does NOT: 2.12's transport_gpio_reset
+# drives ACTIVE -> INACTIVE -> ACTIVE and returns, which for an active-low line
+# leaves the co-processor held in reset and every SDIO card init then times out.
+# Declaring the line active-HIGH turns that same sequence into the correct
+# high-low-high pulse.
+#
+# The SD card is on SDMMC slot 0 and the co-processor on slot 1. Those coexist
+# on ESP-IDF 5.x; only 6.0 needs the workaround esp_hosted's own SD example
+# carries (see its sd_card_functions.c).
+CONFIG_ESP_HOSTED_ENABLED=y
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
+CONFIG_ESP32P4_TAB5_C6_BOARD=y
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y
+CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
+
+# The controller runs on the co-processor, so the local one is off and
+# Bluedroid is handed a virtual HCI that tunnels over SDIO.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_DISABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
+CONFIG_BT_CLASSIC_ENABLED=n
+CONFIG_BT_GATTC_ENABLE=y
+CONFIG_BT_GATTS_ENABLE=n
+CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID=y
+CONFIG_ESP_HOSTED_BLUEDROID_HCI_VHCI=y
+
+# The transport buffers go to PSRAM. The P4's GDMA reaches PSRAM through the
+# cache, and internal RAM here is already spoken for by the 256KB L2 cache, the
+# interpreter's IRAM and the display/USB/audio DMA buffers - the pool cannot be
+# created at all without this ("HS_MP: mempool create failed: no mem", and then
+# the transport resets the host in a loop).
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+# Fewer, since each queue entry is a buffer.
+CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=10
+CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=10
+
+# ---- BLE host tuning (carried over from the ESP32-S3 fork) ------------------
+# A HID peripheral registers a notification per input report, and report-protocol
+# devices have several (keyboard, consumer, mouse, battery). The limit is the
+# TOTAL across all devices, not per device, so a keyboard plus a combo mouse
+# overruns the default of 5 - and the registrations that fail belong to whichever
+# device connected LAST, which looks like a device that pairs fine and then never
+# sends anything ("Max Notification Reached" in the log).
+CONFIG_BT_GATTC_NOTIF_REG_MAX=32
+# Two links is all this needs: one keyboard, one mouse.
+CONFIG_BT_ACL_CONNECTIONS=2
+# Internal RAM is the scarce resource here (L2 cache, the interpreter's IRAM,
+# the display and USB DMA buffers), so the stack allocates from PSRAM where it
+# can. The BT_CTRL_* equivalents the S3 fork sets do not exist in this build:
+# the controller is on the companion ESP32-C6, not on this chip.
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
+CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
+
+# FatFs fast seek. Disk images are read through the filesystem and the emulator
+# seeks constantly; without this every seek walks the FAT chain from the start.
+# Set by hand during tuning and, until now, missing from this file - so a clean
+# build produced a measurably slower emulator from identical sources.
+CONFIG_FATFS_USE_FASTSEEK=y
+CONFIG_FATFS_FAST_SEEK_BUFFER_SIZE=64

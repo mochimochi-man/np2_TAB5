@@ -1,0 +1,45 @@
+# Route the whole np2kai core's static .bss/.common into external RAM (PSRAM).
+# Requires CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y.
+# This is what makes the ~6MB of core static data fit — no per-array pointer surgery.
+
+[scheme:np2kai_extram]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+
+# Interpreter TEXT in IRAM: the hot V30 exec loop is ~63KB — bigger than the 32KB
+# instruction cache, so running from flash XIP thrashes. IRAM has no fetch wait.
+[scheme:np2kai_iram]
+entries:
+    text -> iram0_text
+
+[mapping:np2kai]
+archive: libnp2kai.a
+entries:
+    # Keep only the small, very hot register file + access tables (i386core /
+    # reg*_b* in ia32.c, ~7KB) in fast internal DRAM. NOTE: moving the 64KB SZP
+    # flag table (cpucore.c szpflag_w) to internal measured no speedup but cost
+    # 64KB of internal SRAM — that budget is far better spent on the 32KB
+    # instruction cache (which *did* help a lot), so cpucore stays in PSRAM.
+    ia32 (default)
+    i286c (np2kai_iram)
+    i286c_mn (np2kai_iram)
+    i286c_8x (np2kai_iram)
+    i286c_f6 (np2kai_iram)
+    i286c_fe (np2kai_iram)
+    i286c_0f (np2kai_iram)
+    i286c_rp (np2kai_iram)
+    i286c_sf (np2kai_iram)
+    i286c_ea (np2kai_iram)
+    v30patch (np2kai_iram)
+    cpumem (np2kai_iram)
+    # NOTE (2026-08-09): moving hot CPU data to internal DRAM was measured to give
+    # NO speedup — i286core (148B) and _szpflag16 (64KB) each left loop=~12000us/
+    # frame unchanged. The 148B register file already stays cache-resident, and the
+    # 64KB flag table relocation didn't help either. So data placement is NOT the
+    # bottleneck for the current workload; both were reverted. (See np2-espresso-perf.)
+    # The palette tables (np2_pal16/np2_pal32, a few KB) stay internal: the
+    # composite in sdraw.mcr looks one up for every single pixel of every dirty
+    # line, which is the most frequently indexed array in the whole program.
+    palettes (default)
+    * (np2kai_extram)

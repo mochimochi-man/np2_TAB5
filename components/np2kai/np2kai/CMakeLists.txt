@@ -1,0 +1,1593 @@
+cmake_minimum_required(VERSION 3.10)
+
+project(
+	NP2kai
+	VERSION 0.86.0.22
+	DESCRIPTION "NEC PC-98x1 and EPSON PC-x86 emulator"
+	HOMEPAGE_URL "https://domisan.sakura.ne.jp/article/np2kai/np2kai.html"
+	LANGUAGES C CXX
+)
+
+cmake_policy(SET CMP0076 NEW)
+list(APPEND CMAKE_MODULE_PATH "${NP2kai_SOURCE_DIR}/cmake")
+
+# PkgConfig
+find_package(PkgConfig REQUIRED)
+
+# Windows
+if(WIN32 OR WIN64 OR MSVC_VERSION OR MINGW OR MSYS OR CYGWIN)
+  set(NP2kai_Windows true)
+endif()
+
+# Git
+find_package(Git)
+
+# Does git work?
+execute_process(COMMAND ${GIT_EXECUTABLE} version RESULT_VARIABLE git_result OUTPUT_QUIET ERROR_QUIET)
+if(NOT git_result EQUAL 0)
+	message(FATAL_ERROR "Need the Git command to build NP2kai.")
+endif()
+
+# NP2kai Git version
+# Fall back on the cmake project version if no tag is defined or found (cloned repo)
+if(DEFINED ENV{NP2KAI_VERSION})
+	set(NP2kai_GIT_TAG $ENV{NP2KAI_VERSION})
+else()
+	execute_process(COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0 OUTPUT_VARIABLE NP2kai_GIT_TAG OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_QUIET ERROR_QUIET RESULT_VARIABLE git_result)
+	#message(${git_result})
+	if(NOT git_result EQUAL 0)
+		if(NOT DEFINED CMAKE_PROJECT_VERSION)
+			message(FATAL_ERROR "Need a Git tag to build NP2kai. Try setting NP2KAI_VERSION or add a tag: git tag -a TAG -m DESC")
+		else()
+			set(NP2kai_GIT_TAG ${CMAKE_PROJECT_VERSION})
+		endif()
+	endif()
+endif()
+if(DEFINED ENV{NP2KAI_HASH})
+	set(NP2kai_GIT_HASH $ENV{NP2KAI_HASH})
+else()
+	execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD OUTPUT_VARIABLE NP2kai_GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE git_result)
+	if(NOT git_result EQUAL 0)
+		set(NP2kai_GIT_HASH "unknown")
+	endif()
+endif()
+if(NOT NP2kai_GIT_TAG)
+#	message(FATAL_ERROR "Need a Git tag to build NP2kai.")
+endif()
+if(NOT NP2kai_GIT_HASH)
+	message(FATAL_ERROR "Need a Git commit hash to build NP2kai.")
+endif()
+set(NP2kai_GIT_VERSION "${NP2kai_GIT_TAG} ${NP2kai_GIT_HASH}")
+
+if(__EMSCRIPTEN__)
+	set(USE_SDL "2" CACHE STRING "SDL version to use (1, 2, or 3)" FORCE)
+	include_directories("${NP2kai_SOURCE_DIR}/sdl/em" "${NP2kai_SOURCE_DIR}/sdl")
+	add_definitions(-D__EMSCRIPTEN__ -DUSE_SDL=${USE_SDL})
+endif()
+
+message("*** NP2kai version is ${NP2kai_GIT_TAG} ${NP2kai_GIT_HASH}")
+
+if(MSVC_VERSION)
+	# vcpkg
+	if(DEFINED ENV{VCPKG_ROOT})
+		message("-- Found vcpkg")
+    	set(CMAKE_TOOLCHAIN_FILE $ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake CACHE STRING "")
+	else()
+		message(FATAL_ERROR "-- Not found: vcpkg")
+	endif()
+endif()
+
+# NP2kai include dirs
+list(APPEND NP2kai_common_include_dirs "${NP2kai_SOURCE_DIR}")
+
+list(APPEND NP2kai_normal_include_dirs "${NP2kai_SOURCE_DIR}/i286c")
+
+list(APPEND NP2kai_ia32_include_dirs "${NP2kai_SOURCE_DIR}/i386c" "${NP2kai_SOURCE_DIR}/i386c/ia32")
+
+list(APPEND NP2kai_SDL_include_dirs "${NP2kai_SOURCE_DIR}/sdl")
+list(APPEND NP2kai_SDL_Windows_include_dirs ${NP2kai_SDL_include_dirs} "${NP2kai_SOURCE_DIR}/sdl/windows")
+list(APPEND NP2kai_SDL_UNIX_include_dirs ${NP2kai_SDL_include_dirs} "${NP2kai_SOURCE_DIR}/sdl/unix")
+list(APPEND NP2kai_libretro_include_dirs ${NP2kai_SDL_include_dirs} "${NP2kai_SOURCE_DIR}/sdl/libretro")
+list(APPEND NP2kai_Emscripten_include_dirs ${NP2kai_SDL_include_dirs} "${NP2kai_SOURCE_DIR}/sdl/em")
+list(APPEND NP2kai_OpenDingux_include_dirs ${NP2kai_SDL_include_dirs} "${NP2kai_SOURCE_DIR}/sdl/opendingux")
+
+list(APPEND NP2kai_X_include_dirs "${NP2kai_SOURCE_DIR}/x")
+
+list(APPEND NP2kai_WX_include_dirs "${NP2kai_SOURCE_DIR}/wx")
+
+list(APPEND NP2kai_Windows_include_dirs "${NP2kai_SOURCE_DIR}/windows" "${NP2kai_SOURCE_DIR}/windows/misc")
+
+# NP2kai sources
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/calendar.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/debugsnapshot.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/keystat.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/nevent.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/pccore.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/statsave.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/timing.c")
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/bios/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/cbus/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/eucsjis.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/eucucs2.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/jisucs2.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/sjiseuc.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/sjisucs2.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/tcswap16.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/tcswap32.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/ucs2sjis.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/ucs2ucs4.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/ucs2utf8.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/ucs4ucs2.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/ucs4utf8.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/utf8ucs2.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/utf8ucs4.c")
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/common/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/cd/cdd_ccd.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/cd/cdd_cue.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/cd/cdd_iso.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/cd/cdd_mds.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/cd/cdd_nrg.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/cd/cdd_libcdio.c")
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/fd/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/fdd/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/font/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/cmjasts.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/cmndraw.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/cmver.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/dipswbmp.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/hostdrvs.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/keydisp.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/memdbg32.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/np2info.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/softkbd.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/unasm.c")
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/io/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/lio/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/mem/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/adpcmc.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/adpcmg.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/beepc.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/beepg.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/cs4231c.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/cs4231g.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/ct1741c.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/ct1741g.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/fmboard.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/oplgenc.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/oplgeng.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/opngenc.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/opngeng.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/opntimer.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/pcm86c.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/pcm86g.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/pcmmix.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/psggenc.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/psggeng.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/rhythmc.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/s98.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/sndcsec.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/sound.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/soundrom.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/tms3631c.c")
+list(APPEND NP2kai_common_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/tms3631g.c")
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/sound/fmgen/*.c" "${CMAKE_CURRENT_SOURCE_DIR}/sound/fmgen/*.cpp")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/sound/getsnd/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/sound/mame/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/sound/mamebsd/*.cpp")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/sound/vermouth/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/trap/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/vram/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/wab/*.c")
+list(APPEND NP2kai_common_sources ${NP2kai_temp})
+
+list(APPEND NP2kai_normal_sources "${CMAKE_CURRENT_SOURCE_DIR}/debugsub.c")
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/i286c/*.c")
+list(APPEND NP2kai_normal_sources ${NP2kai_temp})
+
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/debugsub386.c")
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/i386c/*.c")
+list(APPEND NP2kai_ia32_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/*.c")
+list(APPEND NP2kai_ia32_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/*.c")
+list(APPEND NP2kai_ia32_sources ${NP2kai_temp})
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/fpu/fpdummy.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/fpu/fpemul_dosbox.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/fpu/fpemul_dosbox2.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/fpu/fpemul_softfloat.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/fpu/fpemul_softfloat3.cpp")
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/fpu/softfloat/*.c")
+list(APPEND NP2kai_ia32_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/fpu/softfloat3/*.c")
+list(APPEND NP2kai_ia32_sources ${NP2kai_temp})
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/mmx/3dnow.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/mmx/mmx.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/sse/sse.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/sse2/sse2.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/sse3/sse3.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/ssse3/ssse3.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/sse4/sse4_1.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/sse4/sse4_2.c")
+list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/i386c/ia32/instructions/sse4a/sse4a.c")
+
+if(NP2kai_Windows AND MSVC_VERSION)
+  list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/hostdrvnt.c")
+else()
+  list(APPEND NP2kai_ia32_sources "${CMAKE_CURRENT_SOURCE_DIR}/generic/hostdrv.c")
+endif()
+
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/i386hax/*.c")
+list(APPEND NP2kai_HAXM_sources ${NP2kai_temp})
+
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/sdl/*.c")
+list(APPEND NP2kai_SDL_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/embed/*.c")
+list(APPEND NP2kai_SDL_sources ${NP2kai_temp})
+list(APPEND NP2kai_SDL_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/textcnv.c")
+list(APPEND NP2kai_SDL_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/opl3.c")
+list(APPEND NP2kai_SDL_sources "${CMAKE_CURRENT_SOURCE_DIR}/sound/opna.c")
+list(APPEND NP2kai_SDL_Windows_sources "${CMAKE_CURRENT_SOURCE_DIR}/sdl/windows/main.c")
+list(APPEND NP2kai_SDL_UNIX_sources "${CMAKE_CURRENT_SOURCE_DIR}/sdl/unix/main.c")
+list(APPEND NP2kai_libretro_sources "${CMAKE_CURRENT_SOURCE_DIR}/sdl/libretro/libretro.c")
+list(APPEND NP2kai_OpenDingux_sources "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/x/*.c")
+list(APPEND NP2kai_X_sources ${NP2kai_temp})
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_about.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_calendar.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_config.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_hostdrv.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_ide.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_midi.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_newdisk.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_pci.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_screen.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_serial.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_sound.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/dialog_wab.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/gtk_drawmng.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/gtk_mouse.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/gtk_keyboard.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/gtk_main.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/gtk_menu.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/gtk_mouse.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/gtk_screen.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/gtk_wrapper.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/window_keydisp.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/x/gtk2/window_softkbd.c")
+list(APPEND NP2kai_X_sources "${CMAKE_CURRENT_SOURCE_DIR}/codecnv/textcnv.c")
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/x/misc/*.cpp")
+list(APPEND NP2kai_X_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/x/ext/*.cpp")
+list(APPEND NP2kai_X_sources ${NP2kai_temp})
+
+list(APPEND NP2kai_Windows_sources "${CMAKE_CURRENT_SOURCE_DIR}/diskimage/cd/cdd_real.c")
+#file(GLOB_RECURSE NP2kai_temp "windows/*.c" "windows/*.cpp")
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/commng/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/commng/wintab/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/debuguty/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/dialog/*.c" "${CMAKE_CURRENT_SOURCE_DIR}/windows/dialog/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/ext/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/misc/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/resources/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/soundmng/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+file(GLOB NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/windows/subwnd/*.cpp")
+list(APPEND NP2kai_Windows_sources ${NP2kai_temp})
+list(APPEND NP2kai_Windows_sources "${CMAKE_CURRENT_SOURCE_DIR}/windows/resources/1252/np2.rc")
+
+list(APPEND NP2kai_WX_sources
+	"${CMAKE_CURRENT_SOURCE_DIR}/embed/vramhdl.c"
+	"${CMAKE_CURRENT_SOURCE_DIR}/embed/vrammix.c"
+)
+
+list(APPEND NP2kai_WX_sources
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/np2app.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/np2frame.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/np2panel.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/np2.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/np2mt.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/ini.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/dosio.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/scrnmng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/soundmng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/kbdmng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/kbtrans.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/mousemng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/joymng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/inputmng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/sysmng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/taskmng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/fontmng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/commng.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/cmmidi.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/cmserial.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/dialog/prefframe.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/subwnd/keydisp.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/codecnv/textcnv.c"
+	"${CMAKE_CURRENT_SOURCE_DIR}/sound/opl3.c"
+	"${CMAKE_CURRENT_SOURCE_DIR}/sound/opna.c"
+	"${CMAKE_CURRENT_SOURCE_DIR}/wx/trace.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/np2_thread.c"
+)
+
+# NP2kai definitions
+list(APPEND NP2kai_common_definitions "BIOS_IO_EMULATION" "OSLANG_UTF8" "SUPPORT_8BPP" "SUPPORT_16BPP" "SUPPORT_24BPP" "SUPPORT_32BPP" "SUPPORT_CL_GD5430" "SUPPORT_CRT15KHZ" "SUPPORT_FAST_MEMORYCHECK" "SUPPORT_FMGEN" "SUPPORT_GPIB" "SUPPORT_HRTIMER" "SUPPORT_KAI_IMAGES" "SUPPORT_LARGE_HDD" "SUPPORT_NORMALDISP" "SUPPORT_PC9861K" "SUPPORT_PX" "SUPPORT_RESUME" "SUPPORT_RS232C_FIFO" "SUPPORT_S98" "SUPPORT_SCSI" "SUPPORT_SMPU98" "SUPPORT_SOFTKBD=0" "SUPPORT_SOUND_SB16" "SUPPORT_STATSAVE=10" "SUPPORT_UTF8" "SUPPORT_V30EXT" "SUPPORT_V30ORIGINAL" "SUPPORT_VIDEOFILTER" "SUPPORT_VPCVHD" "SUPPORT_WAB" "USE_MAME" "USE_MAME_BSD" "VAEG_FIX" "VERMOUTH_LIB" "SUPPORT_PNG")
+
+set(NP2kai_normal_definitions "")
+
+list(APPEND NP2kai_extra_definitions "SUPPORT_SMPU98" "SUPPORT_NVL_IMAGES" "SUPPORT_SWSEEKSND" "SUPPORT_SWWABRLYSND")
+
+list(APPEND NP2kai_ia32_definitions "CPUCORE_IA32" "IA32_PAGING_EACHSIZE" "IA32_REBOOT_ON_PANIC" "SUPPORT_CRT31KHZ" "SUPPORT_PC9801_119" "SUPPORT_PC9821" "SUPPORT_IDEIO" "SUPPORT_LARGE_MEMORY" "SUPPORT_FPU_DOSBOX2_COMPATIBLE" "SUPPORT_PEGC" "SUPPORT_VGA_MODEX" "SUPPORT_GAMEPORT" "SUPPORT_IDEIO_48BIT" "SUPPORT_FPU_SOFTFLOAT3" "SUPPORT_PCI" "USE_FPU" "USE_MMX" "USE_3DNOW" "USE_SSE" "USE_SSE2" "USE_SSE3" "USE_SSSE3" "USE_SSE4_1" "USE_SSE4_2" "USE_SSE4A" "USE_TSC" "USE_FASTPAGING" "USE_VME" "SUPPORT_MEMDBG32")
+if(WIN32)
+  list(APPEND NP2kai_ia32_definitions "USE_CPU_MODRMPREFETCH" "USE_CPU_INLINEINST" "USE_CPU_DIRECTREG" "USE_CPU_EIPMASK")
+endif()
+if(NP2kai_Windows AND MSVC_VERSION)
+  list(APPEND NP2kai_ia32_definitions "SUPPORT_HOSTDRVNT")
+else()
+  list(APPEND NP2kai_ia32_definitions "SUPPORT_HOSTDRV")
+endif()
+
+list(APPEND NP2kai_SDL_definitions "NP2_SDL" "SUPPORT_BMS")
+if(NP2kai_Windows)
+	list(APPEND NP2kai_LinkBreak_definitions "OSLINEBREAK_CRLF")
+else()
+	list(APPEND NP2kai_LinkBreak_definitions "OSLINEBREAK_LF")
+endif()
+
+list(APPEND NP2kai_X_definitions "NP2_X" "USE_RESOURCE_BMP" "SUPPORT_BMS")
+
+list(APPEND NP2kai_WX_definitions "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" "SUPPORT_JOYSTICK" "SUPPORT_NP2_TICKCOUNT" "SUPPORT_NP2_THREAD" "SUPPORT_PTHREAD" "SUPPORT_KEYDISP=1" "SUPPORT_BMS" "USE_RESOURCE_BMP" "SUPPORT_MULTITHREAD" "SOUND_CRITICAL")
+
+list(APPEND NP2kai_Windows_definitions "NP2_WIN" "USE_RESOURCE_BMP" "SUPPORT_MULTITHREAD")
+
+# build option
+option(BUILD_I286 "Build normal(i286 older) NP2" OFF)
+option(BUILD_LIBRETRO "Build Libretro port" OFF)
+option(USE_HAXM "Use HAXM" OFF)
+option(USE_TICKCOUNT "Use TickCount" ON)
+option(USE_NETWORK "Use Network" ON)
+option(USE_ASYNCCPU "Use AsyncCPU" OFF)
+option(USE_VST3SDK "Use VST3SDK" OFF)
+
+# Platform-specific port selection
+if(EMSCRIPTEN)
+	set(BUILD_SDL ON)
+	set(BUILD_WX OFF)
+	set(BUILD_X OFF)
+	set(BUILD_WINDOWS OFF)
+	set(USE_SDL "2" CACHE STRING "SDL version" FORCE)
+elseif(MSVC)
+	set(BUILD_WINDOWS ON)
+	set(BUILD_SDL OFF)
+	set(BUILD_WX OFF)
+	set(BUILD_X OFF)
+	option(BUILD_DLL "Build as DLL" ON)
+else()
+	option(BUILD_WX "Build wxWidgets port" ON)
+	option(BUILD_SDL "Build SDL port" ON)
+	option(BUILD_X "Build X port" OFF)
+	set(BUILD_WINDOWS OFF)
+endif()
+
+# HAXM detection
+if(NOT CMAKE_CROSSCOMPILING)
+	if(WIN32)
+		if(EXISTS "\\\\.\\HAX")
+			set(HAXM_FOUND TRUE)
+		endif()
+	else()
+		# cmake's EXISTS does not detect character devices, so use shell test
+		execute_process(COMMAND test -e /dev/HAX RESULT_VARIABLE _hax_test_result)
+		if(_hax_test_result EQUAL 0)
+			set(HAXM_FOUND TRUE)
+		endif()
+		unset(_hax_test_result)
+	endif()
+	if(HAXM_FOUND OR USE_HAXM)
+		set(BUILD_HAXM ON)
+		message("-- HAXM found or requested")
+	else()
+		set(BUILD_HAXM OFF)
+	endif()
+endif()
+
+# VST3 SDK auto-detection if not specified
+if(NOT DEFINED USE_VST3SDK)
+	if(EXISTS "${NP2kai_SOURCE_DIR}/vst3sdk/CMakeLists.txt")
+		set(USE_VST3SDK ON)
+	endif()
+endif()
+
+# build type
+if(NOT CMAKE_BUILD_TYPE)
+	set(CMAKE_BUILD_TYPE "RelWithDebInfo")
+endif()
+set(COMMON_C_CXX_FLAGS "-Wno-implicit-function-declaration -Wno-incompatible-pointer-types -Wno-incompatible-function-pointer-types -Wno-int-conversion")
+set(COMMON_CXX_ONLY_FLAGS "-fno-sized-deallocation")
+if(NOT EMSCRIPTEN)
+set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -Wall -DDEBUG -DTRACE ${COMMON_C_CXX_FLAGS} ${COMMON_CXX_ONLY_FLAGS}")
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -Wall -DNDEBUG ${COMMON_C_CXX_FLAGS} ${COMMON_CXX_ONLY_FLAGS}")
+set(CMAKE_CXX_FLAGS_MINSIZEREL "-Os -Wall")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-Og -g -Wall -DNDEBUG")
+set(CMAKE_C_FLAGS ${COMMON_C_CXX_FLAGS})
+else()
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_C_CXX_FLAGS} ${COMMON_CXX_ONLY_FLAGS}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMMON_C_CXX_FLAGS}")
+endif()
+set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+
+# OpenDingux options
+option(BUILD_OPENDINGUX_GCW0 "Build OpenDingux GCW0 port" OFF)
+option(BUILD_OPENDINGUX_RG350 "Build OpenDingux RG350 port" OFF)
+option(BUILD_OPENDINGUX_RS90 "Build OpenDingux RS90 port" OFF)
+
+if(EMSCRIPTEN)
+elseif(BUILD_OPENDINGUX_GCW0)
+	include("cmake/CrossOpenDinguxGCW0.cmake")
+elseif(BUILD_OPENDINGUX_RG350)
+	include("cmake/CrossOpenDinguxRG350.cmake")
+elseif(BUILD_OPENDINGUX_RS90)
+	include("cmake/CrossOpenDinguxRS90.cmake")
+endif()
+
+if(OPENDINGUX)
+	option(USE_OPENDINGUX_VGA "OpenDingux has VGA display" OFF)
+	if(USE_OPENDINGUX_VGA)
+		list(APPEND OPENDINGUX_VGA_definitions "OPENDINGUX_VGA")
+	endif()
+endif()
+
+if(NOT MSVC AND NOT BUILD_LIBRETRO AND NOT EMSCRIPTEN)
+	set(USE_SDL "3" CACHE STRING "SDL version to use (1, 2, or 3)")
+endif()
+
+# function
+if(USE_TICKCOUNT)
+	list(APPEND NP2kai_TickCount_definitions "SUPPORT_NP2_TICKCOUNT")
+	list(APPEND NP2kai_TickCount_sources "${CMAKE_CURRENT_SOURCE_DIR}/np2_tickcount.c")
+endif()
+
+if(USE_NETWORK)
+	list(APPEND NP2kai_Network_definitions "SUPPORT_NET" "SUPPORT_LGY98")
+	file(GLOB_RECURSE NP2kai_temp "${CMAKE_CURRENT_SOURCE_DIR}/network/*.c")
+	list(APPEND NP2kai_Network_sources ${NP2kai_temp})
+endif()
+
+if(USE_ASYNCCPU)
+	list(APPEND NP2kai_AsyncCPU_definitions "SUPPORT_ASYNC_CPU")
+endif()
+
+if(NOT CMAKE_CROSSCOMPILING)
+
+	# math
+	if(NOT NP2kai_Windows)
+		list(APPEND lib_math_libraries m)
+	endif()
+
+	# dynamic link
+	if(NOT NP2kai_Windows)
+		list(APPEND lib_dl_libraries ${CMAKE_DL_LIBS})
+	endif()
+
+	# SDL
+	if(NOT MSVC_VERSION)
+		if(USE_SDL EQUAL 3)
+  		find_package(SDL3)
+			if(SDL3_FOUND)
+				message("-- Found: SDL3 (" ${SDL3_VERSION} ")")
+			else()
+				message(FATAL_ERROR "-- Not found: SDL3")
+			endif()
+		elseif(USE_SDL EQUAL 2)
+  		find_package(SDL2 REQUIRED)
+			if(SDL2_FOUND)
+				message("-- Found: SDL2 (" ${SDL2_VERSION} ")")
+			else()
+				message(FATAL_ERROR "-- Not found: SDL2")
+			endif()
+		elseif(USE_SDL EQUAL 1)
+  		find_package(SDL REQUIRED)
+			if(SDL_FOUND)
+				message("-- Found: SDL (" ${SDL_VERSION} ")")
+			else()
+				message(FATAL_ERROR "-- Not found: SDL")
+			endif()
+		endif()
+	endif()
+
+	# SDL_ttf
+	if(NOT MSVC_VERSION)
+		if(USE_SDL EQUAL 3)
+  		find_package(SDL3_ttf)
+			if(SDL3_ttf_FOUND)
+				message("-- Found: SDL3_ttf (" ${SDL3_ttf_VERSION} ")")
+			else()
+				message("-- Not found: SDL3_ttf")
+			endif()
+		elseif(USE_SDL EQUAL 2)
+  		find_package(SDL2_ttf REQUIRED)
+			if(SDL2_ttf_FOUND)
+				message("-- Found: SDL2_ttf (" ${SDL2_ttf_VERSION} ")")
+			else()
+				message(FATAL_ERROR "-- Not found: SDL2_ttf")
+			endif()
+		elseif(USE_SDL EQUAL 1)
+  		find_package(SDL_ttf REQUIRED)
+			if(SDL_ttf_FOUND)
+				message("-- Found: SDL_ttf (" ${SDL_ttf_VERSION} ")")
+			else()
+				message(FATAL_ERROR "-- Not found: SDL_ttf")
+			endif()
+		endif()
+	else()
+		if(USE_SDL EQUAL 3)
+			find_path(SDL3_ttf_FOUND "sdl3-ttf_x86-windows" "$ENV{VCPKG_ROOT}/packages")
+			if(SDL3_ttf_FOUND)
+				message("-- Found SDL3_ttf")
+				set(SDL3_TTF_INCLUDE_DIR "$ENV{VCPKG_ROOT}/packages/sdl3-ttf_x86-windows/include/SDL3")
+				if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+					set(SDL3_TTF_LIBRARY "$ENV{VCPKG_ROOT}/packages/sdl3-ttf_x86-windows/debug/lib/SDL3_ttf.lib")
+				else()
+					set(SDL3_TTF_LIBRARY "$ENV{VCPKG_ROOT}/packages/sdl3-ttf_x86-windows/lib/SDL3_ttf.lib")
+				endif()
+			else()
+				message("-- Not found: SDL3_ttf")
+			endif()
+		elseif(USE_SDL EQUAL 2)
+			find_path(SDL2_ttf_FOUND "sdl2-ttf_x86-windows" "$ENV{VCPKG_ROOT}/packages")
+			if(SDL2_ttf_FOUND)
+				message("-- Found SDL2_ttf")
+				set(SDL2_TTF_INCLUDE_DIR "$ENV{VCPKG_ROOT}/packages/sdl2-ttf_x86-windows/include/SDL2")
+				if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+					set(SDL2_TTF_LIBRARY "$ENV{VCPKG_ROOT}/packages/sdl2-ttf_x86-windows/debug/lib/SDL2_ttf.lib")
+				else()
+					set(SDL2_TTF_LIBRARY "$ENV{VCPKG_ROOT}/packages/sdl2-ttf_x86-windows/lib/SDL2_ttf.lib")
+				endif()
+			else()
+				message(FATAL_ERROR "-- Not found: SDL2_ttf")
+  		endif()
+		endif()
+	endif()
+	if(SDL3_ttf_FOUND OR SDL2_ttf_FOUND OR SDL_ttf_FOUND)
+		list(APPEND lib_SDL_ttf_definitions "SUPPORT_SDL_TTF")
+		if(NP2kai_Windows AND NOT MSVC_VERSION)
+			list(APPEND lib_SDL_ttf_depend_libraries freetype)
+		endif()
+	endif()
+
+	# wxWidgets
+	if(BUILD_WX)
+		find_package(wxWidgets COMPONENTS core base adv REQUIRED)
+		if(wxWidgets_FOUND)
+			message("-- Found: wxWidgets (" ${wxWidgets_VERSION_STRING} ")")
+			include(${wxWidgets_USE_FILE})
+		else()
+			message(FATAL_ERROR "-- Not found: wxWidgets")
+		endif()
+
+		# toml++ (tomlplusplus)
+		find_package(tomlplusplus QUIET)
+		if(tomlplusplus_FOUND)
+			message("-- Found: toml++")
+			list(APPEND lib_tomlplusplus_libraries tomlplusplus::tomlplusplus)
+		else()
+			# fall back to pkg-config
+			pkg_check_modules(TOMLPLUSPLUS QUIET tomlplusplus)
+			if(TOMLPLUSPLUS_FOUND)
+				message("-- Found: toml++ (pkg-config)")
+				list(APPEND lib_tomlplusplus_include_dirs ${TOMLPLUSPLUS_INCLUDE_DIRS})
+			else()
+				message("-- toml++ not found via cmake/pkg-config, assuming header-only in system include path")
+			endif()
+		endif()
+	endif()
+
+	# libpng
+	find_package(PNG REQUIRED)
+
+	# libcdio
+	pkg_check_modules(LIBCDIO libcdio)
+	list(APPEND libcdio_definitions "SUPPORT_LIBCDIO")
+
+	# libusb
+	if(NOT MSVC_VERSION)  # temporaly
+	if(USE_USB)
+		pkg_check_modules(LIBUSB_1 REQUIRED libusb-1.0)
+		list(APPEND libusb_1_definitions "SUPPORT_USB")
+	endif()
+	endif()
+
+	# cmd-f to toggle fullscreen mode
+	if(CMAKE_HOST_APPLE)
+		add_compile_definitions(CMD_F_FSTOGGLE)
+	endif()
+
+	# HAXM
+	if(NOT CMAKE_CROSSCOMPILING)
+		if(NP2kai_Windows)
+			if(EXISTS "\\\\.\\HAX")
+				set(HAXM true)
+			endif()
+		else()
+			# cmake's EXISTS does not detect character devices, so use shell test
+			execute_process(COMMAND test -e /dev/HAX RESULT_VARIABLE _hax_test_result)
+			if(_hax_test_result EQUAL 0)
+				set(HAXM true)
+			endif()
+			unset(_hax_test_result)
+		endif()
+		if(HAXM)
+			message("-- Found HAXM")
+		else()
+			if(USE_HAXM)
+				message(FATAL_ERROR "-- Not found: HAXM")
+			else()
+				message("-- Not found: HAXM")
+			endif()
+		endif()
+		if(HAXM OR USE_HAXM)
+			list(APPEND NP2kai_HAXM_definitions "SUPPORT_IA32_HAXM" "USE_CUSTOM_HOOKINST")
+		endif()
+	endif()
+
+	# VST3 SDK
+	if(USE_VST3SDK)
+		find_path(VST3SDK_CMAKE "README.md" "cmake/vst3_cmake")
+		if(NOT VST3SDK)
+			execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive ${NP2kai_SOURCE_DIR}/cmake/vst3_cmake)
+		endif()
+		set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${NP2kai_SOURCE_DIR}/cmake/vst3_cmake/modules")
+#		set(SMTG_MYPLUGINS_SRC_PATH "sdl/---")
+#		set(SMTG_MYPLUGINS_SRC_PATH "x/---")
+#		set(SMTG_MYPLUGINS_SRC_PATH "windows/---")
+		find_path(VST3SDK "CMakeLists.txt" "vst3sdk")
+		if(NOT VST3SDK)
+			execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive ${NP2kai_SOURCE_DIR}/vst3sdk)
+		endif()
+		add_subdirectory("vst3sdk")
+		list(APPEND lib_vst3sdk_libraries "vst3sdk")
+	endif()
+
+	if(MSVC_VERSION)
+		# WDK
+		find_path(WDK_CMAKE "README.md" "cmake/FindWDK")
+		if(NOT WDK_CMAKE)
+			execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive ${NP2kai_SOURCE_DIR}/cmake/FindWDK)
+		endif()
+		set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${NP2kai_SOURCE_DIR}/cmake/FindWDK/cmake")
+		find_package(WDK REQUIRED)
+	endif()
+endif()
+
+if(CMAKE_CROSSCOMPILING)
+
+	# Enscripten
+	if(EMSCRIPTEN)
+		if((USE_SDL EQUAL 1) AND USE_SDL_TTL)
+			message(FATAL_ERROR "-- Emscripten SDL1 NP2kai cannot be with SDL_ttf (-D USE_SDL_TTF=OFF)")
+		endif()
+
+	# OpenDigux
+	elseif(BUILD_OPENDINGUX_GCW0)
+		if((USE_SDL EQUAL 1) AND USE_SDL_TTF)
+			message(FATAL_ERROR "-- OpenDingux GCW0 NP2kai cannot be with SDL and SDL_ttf (use -D USE_SDL2=OFF -D USE_SDL_TTF=OFF)")
+		endif()
+		find_path(gcw0toolchain "bin" "/opt/gcw0-toolchain/usr")
+		if(gcw0toolchain)
+			message("-- Found OpenDingux GCW0 toolchain")
+		else()
+			message(FATAL_ERROR "-- Not found: OpenDingux GCW0 toolchain")
+		endif()
+
+	elseif(BUILD_OPENDINGUX_RG350)
+#		find_path(rg350toolchain "bin" "/opt/rg350-toolchain/usr")
+#		if(rg350toolchain)
+#			message("-- Found OpenDingux RG350 toolchain")
+#		else()
+#			message(FATAL_ERROR "-- Not found: OpenDingux RG350 toolchain")
+#		endif()
+
+	elseif(BUILD_OPENDINGUX_RS90)
+		if((USE_SDL EQUAL 2) OR USE_SDL_TTF)
+			message(FATAL_ERROR "-- OpenDingux RS90 NP2kai cannot be with SDL2 and SDL_ttf (use -D USE_SDL2=OFF -D USE_SDL_TTF=OFF)")
+		endif()
+
+		find_path(rs90toolchain "bin" "/opt/rs90-toolchain/usr")
+		if(rs90toolchain)
+			message("-- Found OpenDingux RS90 toolchain")
+		else()
+			message(FATAL_ERROR "-- Not found: OpenDingux RS90 toolchain")
+		endif()
+	endif()
+
+endif()
+
+# target base
+add_library(NP2kai_bbase INTERFACE)
+target_compile_definitions(NP2kai_bbase INTERFACE ${NP2kai_common_definitions} "NP2KAI_GIT_TAG=\"${NP2kai_GIT_TAG}\"" "NP2KAI_GIT_HASH=\"${NP2kai_GIT_HASH}\"")
+target_include_directories(NP2kai_bbase INTERFACE ${NP2kai_common_include_dirs})
+if(__EMSCRIPTEN__)
+	target_include_directories(NP2kai_bbase INTERFACE "${NP2kai_SOURCE_DIR}/sdl/em" "${NP2kai_SOURCE_DIR}/sdl")
+	target_compile_definitions(NP2kai_bbase INTERFACE "USE_SDL=${USE_SDL}")
+endif()
+target_sources(NP2kai_bbase INTERFACE ${NP2kai_common_sources})
+# Force compiler.h as the first include for all C translation units to fix
+# alphabetically-sorted include order introduced in recent upstream merges.
+if(__EMSCRIPTEN__)
+	target_compile_options(NP2kai_bbase INTERFACE $<$<COMPILE_LANGUAGE:C>:-include ${NP2kai_SOURCE_DIR}/sdl/em/compiler.h>)
+else()
+	target_compile_options(NP2kai_bbase INTERFACE $<$<COMPILE_LANGUAGE:C>:-include compiler.h>)
+endif()
+if(NP2kai_Windows AND NOT MSVC_VERSION)
+target_link_libraries(NP2kai_bbase INTERFACE stdc++)
+elseif(NOT NP2kai_Windows)
+target_link_libraries(NP2kai_bbase INTERFACE)
+endif()
+target_link_libraries(NP2kai_bbase INTERFACE PNG::PNG)
+
+add_library(NP2kai_base INTERFACE)
+target_compile_definitions(NP2kai_base INTERFACE ${NP2kai_normal_definitions})
+target_include_directories(NP2kai_base INTERFACE ${NP2kai_normal_include_dirs})
+target_sources(NP2kai_base INTERFACE ${NP2kai_normal_sources})
+target_link_libraries(NP2kai_base INTERFACE NP2kai_bbase)
+
+add_library(NP21kai_base INTERFACE)
+target_compile_definitions(NP21kai_base INTERFACE ${NP2kai_ia32_definitions})
+target_include_directories(NP21kai_base INTERFACE ${NP2kai_ia32_include_dirs})
+target_sources(NP21kai_base INTERFACE ${NP2kai_ia32_sources})
+target_link_libraries(NP21kai_base INTERFACE NP2kai_bbase)
+
+add_library(NP21kai_HAXM_base INTERFACE)
+target_compile_definitions(NP21kai_HAXM_base INTERFACE ${NP2kai_HAXM_definitions})
+target_sources(NP21kai_HAXM_base INTERFACE ${NP2kai_HAXM_sources})
+target_link_libraries(NP21kai_HAXM_base INTERFACE NP21kai_base)
+
+if(CMAKE_CROSSCOMPILING)
+
+	if(__EMSCRIPTEN__)
+		set(NP2kai_Emscripten_MinMemorySize 67108864)
+		set(NP2kai_Emscripten_MaxMemorySize 1073741824)
+
+		if(USE_SDL EQUAL 1)
+			add_library(NP2kai_Emscripten_SDL1_base INTERFACE)
+			target_compile_definitions(NP2kai_Emscripten_SDL1_base INTERFACE ${NP2kai_SDL_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" "SUPPORT_NP2_TICKCOUNT")
+			target_include_directories(NP2kai_Emscripten_SDL1_base INTERFACE ${NP2kai_Emscripten_include_dirs})
+			target_compile_options(NP2kai_Emscripten_SDL1_base INTERFACE "SHELL:-s USE_SDL=1" "SHELL:-s USE_SDL_TTF=1")
+			target_link_options(NP2kai_Emscripten_SDL1_base INTERFACE "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}" "SHELL:-s USE_SDL=1" "SHELL:-s USE_SDL_TTF=1" "SHELL:-s ASSERTIONS=1")
+			target_link_libraries(NP2kai_Emscripten_SDL1_base INTERFACE m ssl crypto)
+			target_sources(NP2kai_Emscripten_SDL1_base INTERFACE ${NP2kai_SDL_sources} "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		elseif(USE_SDL EQUAL 2)
+			add_library(NP2kai_Emscripten_SDL2_base INTERFACE)
+			target_compile_definitions(NP2kai_Emscripten_SDL2_base INTERFACE ${NP2kai_SDL_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" ${lib_SDL_ttf_definitions} "SUPPORT_NP2_TICKCOUNT")
+			target_include_directories(NP2kai_Emscripten_SDL2_base INTERFACE ${NP2kai_Emscripten_include_dirs})
+			target_compile_options(NP2kai_Emscripten_SDL2_base INTERFACE "SHELL:-s USE_SDL=2" "SHELL:-s USE_SDL_TTF=2")
+			target_link_options(NP2kai_Emscripten_SDL2_base INTERFACE "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}" "SHELL:-s USE_SDL=2" "SHELL:-s USE_SDL_TTF=2" "SHELL:-s ASSERTIONS=1")
+			target_link_libraries(NP2kai_Emscripten_SDL2_base INTERFACE m ssl crypto)
+			target_sources(NP2kai_Emscripten_SDL2_base INTERFACE ${NP2kai_SDL_sources}  "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		elseif(USE_SDL EQUAL 3)
+			add_library(NP2kai_Emscripten_SDL3_base INTERFACE)
+			target_compile_definitions(NP2kai_Emscripten_SDL3_base INTERFACE ${NP2kai_SDL_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" ${lib_SDL_ttf_definitions} "SUPPORT_NP2_TICKCOUNT")
+			target_include_directories(NP2kai_Emscripten_SDL3_base INTERFACE ${NP2kai_Emscripten_include_dirs})
+			target_compile_options(NP2kai_Emscripten_SDL3_base INTERFACE "SHELL:-s USE_SDL=3" "SHELL:-s USE_SDL_TTF=3")
+			target_link_options(NP2kai_Emscripten_SDL3_base INTERFACE "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}" "SHELL:-s USE_SDL=3" "SHELL:-s USE_SDL_TTF=3" "SHELL:-s ASSERTIONS=1")
+			target_link_libraries(NP2kai_Emscripten_SDL3_base INTERFACE m ssl crypto)
+			target_sources(NP2kai_Emscripten_SDL3_base INTERFACE ${NP2kai_SDL_sources}  "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		endif()
+	endif()
+
+	if(BUILD_OPENDINGUX_GCW0)
+		if(USE_SDL EQUAL 1)
+			add_library(NP2kai_gcw0_SDL1_base INTERFACE)
+			target_compile_definitions(NP2kai_gcw0_SDL1_base INTERFACE ${NP2kai_SDL_definitions} "__OPENDINGUX__" ${OPENDINGUX_VGA_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" "SUPPORT_NP2_TICKCOUNT" "SUPPORT_NP2_THREAD" ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions})
+			target_sources(NP2kai_gcw0_SDL1_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_OpenDingux_sources} "${CMAKE_CURRENT_SOURCE_DIR}/np2_thread.c" ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+			target_link_directories(NP2kai_gcw0_SDL1_base INTERFACE "/opt/gcw0-toolchain/usr/mipsel-gcw0-linux-uclibc/sysroot/usr/lib")
+			target_include_directories(NP2kai_gcw0_SDL1_base INTERFACE ${NP2kai_OpenDingux_include_dirs} "/opt/gcw0-toolchain/usr/mipsel-gcw0-linux-uclibc/sysroot/usr/include" "/opt/gcw0-toolchain/usr/mipsel-gcw0-linux-uclibc/sysroot/usr/include/SDL")
+			target_link_libraries(NP2kai_gcw0_SDL1_base INTERFACE m ssl crypto pthread SDL)
+		elseif(USE_SDL EQUAL 2)
+			add_library(NP2kai_gcw0_SDL2_base INTERFACE)
+			target_compile_definitions(NP2kai_gcw0_SDL2_base INTERFACE ${NP2kai_SDL_definitions} "__OPENDINGUX__" ${OPENDINGUX_VGA_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" "SUPPORT_NP2_TICKCOUNT" "SUPPORT_NP2_THREAD" ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions})
+			target_sources(NP2kai_gcw0_SDL2_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_OpenDingux_sources} "${CMAKE_CURRENT_SOURCE_DIR}/np2_thread.c" ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+			target_link_directories(NP2kai_gcw0_SDL2_base INTERFACE "/opt/gcw0-toolchain/usr/mipsel-gcw0-linux-uclibc/sysroot/usr/lib")
+			target_include_directories(NP2kai_gcw0_SDL2_base INTERFACE ${NP2kai_OpenDingux_include_dirs} "/opt/gcw0-toolchain/usr/mipsel-gcw0-linux-uclibc/sysroot/usr/include" "/opt/gcw0-toolchain/usr/mipsel-gcw0-linux-uclibc/sysroot/usr/include/SDL2")
+			target_link_libraries(NP2kai_gcw0_SDL2_base INTERFACE m ssl crypto pthread SDL2)
+		endif()
+	endif()
+
+	if(BUILD_OPENDINGUX_RG350)
+		if(USE_SDL EQUAL 1)
+			add_library(NP2kai_rg350_SDL1_base INTERFACE)
+			target_compile_definitions(NP2kai_rg350_SDL1_base INTERFACE ${NP2kai_SDL_definitions} "__OPENDINGUX__" ${OPENDINGUX_VGA_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" "SUPPORT_NP2_TICKCOUNT" "SUPPORT_NP2_THREAD" ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions})
+			target_sources(NP2kai_rg350_SDL1_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_OpenDingux_sources} "${CMAKE_CURRENT_SOURCE_DIR}/np2_thread.c" ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+			target_link_directories(NP2kai_rg350_SDL1_base INTERFACE "/opt/rg350-toolchain/usr/mipsel-gcw0-linux-uclibc/sysroot/usr/lib")
+			target_include_directories(NP2kai_rg350_SDL1_base INTERFACE ${NP2kai_OpenDingux_include_dirs} "/opt/rg350-toolchain/usr/mipsel-rg350-linux-uclibc/sysroot/usr/include" "/opt/rg350-toolchain/usr/mipsel-rg350-linux-uclibc/sysroot/usr/include/SDL")
+			target_link_libraries(NP2kai_rg350_SDL1_base INTERFACE m ssl crypto pthread SDL)
+		elseif(USE_SDL EQUAL 2)
+			add_library(NP2kai_rg350_SDL2_base INTERFACE)
+			target_compile_definitions(NP2kai_rg350_SDL2_base INTERFACE ${NP2kai_SDL_definitions} "__OPENDINGUX__" ${OPENDINGUX_VGA_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" "SUPPORT_NP2_TICKCOUNT" "SUPPORT_NP2_THREAD" ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions})
+			target_sources(NP2kai_rg350_SDL2_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_OpenDingux_sources} "${CMAKE_CURRENT_SOURCE_DIR}/np2_thread.c" ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+			target_link_directories(NP2kai_rg350_SDL2_base INTERFACE "/opt/rg350-toolchain/usr/mipsel-gcw0-linux-uclibc/sysroot/usr/lib")
+			target_include_directories(NP2kai_rg350_SDL2_base INTERFACE ${NP2kai_OpenDingux_include_dirs} "/opt/rg350-toolchain/usr/mipsel-rg350-linux-uclibc/sysroot/usr/include" "/opt/rg350-toolchain/usr/mipsel-rg350-linux-uclibc/sysroot/usr/include/SDL2")
+			target_link_libraries(NP2kai_rg350_SDL2_base INTERFACE m ssl crypto pthread SDL2)
+		endif()
+	endif()
+
+	if(BUILD_OPENDINGUX_RS90)
+		if(USE_SDL EQUAL 1)
+			add_library(NP2kai_rs90_SDL1_base INTERFACE)
+			target_compile_definitions(NP2kai_rs90_SDL1_base INTERFACE ${NP2kai_SDL_definitions} "__OPENDINGUX__" ${OPENDINGUX_VGA_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" "SUPPORT_NP2_TICKCOUNT" "SUPPORT_NP2_THREAD" ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions})
+			target_include_directories(NP2kai_rs90_SDL1_base INTERFACE ${NP2kai_OpenDingux_include_dirs} "/opt/rs90-toolchain/mipsel-rs90-linux-musl/sysroot/usr/include" "/opt/rs90-toolchain/mipsel-rs90-linux-musl/sysroot/usr/include/SDL")
+			target_sources(NP2kai_rs90_SDL1_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_OpenDingux_sources} "${CMAKE_CURRENT_SOURCE_DIR}/np2_thread.c" ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+			target_link_directories(NP2kai_rs90_SDL1_base INTERFACE "/opt/rs90-toolchain/mipsel-rs90-linux-musl/sysroot/lib")
+			target_link_libraries(NP2kai_rs90_SDL1_base INTERFACE m ssl crypto pthread SDL)
+		elseif(USE_SDL EQUAL 2)
+			add_library(NP2kai_rs90_base INTERFACE)
+			target_compile_definitions(NP2kai_rs90_base INTERFACE ${NP2kai_SDL_definitions} "__OPENDINGUX__" ${OPENDINGUX_VGA_definitions} "OSLINEBREAK_LF" "SUPPORT_SDL_AUDIO" "SUPPORT_NP2_TICKCOUNT" "SUPPORT_NP2_THREAD" ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions})
+			target_include_directories(NP2kai_rs90_base INTERFACE ${NP2kai_OpenDingux_include_dirs} "/opt/rs90-toolchain/mipsel-rs90-linux-musl/sysroot/usr/include" "/opt/rs90-toolchain/mipsel-rs90-linux-musl/sysroot/usr/include/SDL")
+			target_sources(NP2kai_rs90_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_OpenDingux_sources} "${CMAKE_CURRENT_SOURCE_DIR}/np2_thread.c" ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+			target_link_directories(NP2kai_rs90_base INTERFACE "/opt/rs90-toolchain/mipsel-rs90-linux-musl/sysroot/lib")
+			target_link_libraries(NP2kai_rs90_base INTERFACE m ssl crypto pthread SDL2)
+		endif()
+	endif()
+
+else()
+
+	if(BUILD_SDL AND (USE_SDL EQUAL 1))
+		add_library(NP2kai_SDL1_base INTERFACE)
+		target_sources(NP2kai_SDL1_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_Thread_sources} ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+		target_compile_definitions(NP2kai_SDL1_base INTERFACE ${NP2kai_SDL_definitions} "USE_SDL=1" "SUPPORT_SDL_AUDIO" ${lib_SDL_ttf_definitions} ${NP2kai_extra_definitions} ${NP2kai_LinkBreak_definitions} ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions} ${libcdio_definitions} ${libusb_1_definitions})
+		target_include_directories(NP2kai_SDL1_base INTERFACE ${LIBCDIO_INCLUDE_DIRS} ${LIBUSB_1_INCLUDE_DIRS} ${lib_vst3sdk_include_dirs})
+		if(MINGW OR MSYS OR CYGWIN)
+	  	target_link_libraries(NP2kai_SDL1_base INTERFACE ${lib_math_libraries} ${lib_vst3sdk_libraries} SDL::SDL SDL_ttf::SDL_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries} dxguid mad)
+		else()
+	  	target_link_libraries(NP2kai_SDL1_base INTERFACE ${lib_math_libraries} ${lib_vst3sdk_libraries} SDL::SDL SDL_ttf::SDL_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries})
+		endif()
+	elseif(BUILD_SDL AND (USE_SDL EQUAL 2))
+		add_library(NP2kai_SDL2_base INTERFACE)
+		target_sources(NP2kai_SDL2_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_Thread_sources} ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+		target_compile_definitions(NP2kai_SDL2_base INTERFACE ${NP2kai_SDL_definitions} "USE_SDL=2" "SUPPORT_SDL_AUDIO" ${lib_SDL_ttf_definitions} ${NP2kai_extra_definitions} ${NP2kai_LinkBreak_definitions} ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions} ${libcdio_definitions} ${libusb_1_definitions})
+		target_include_directories(NP2kai_SDL2_base INTERFACE ${LIBCDIO_INCLUDE_DIRS} ${LIBUSB_1_INCLUDE_DIRS} ${lib_vst3sdk_include_dirs})
+		if(MINGW OR MSYS OR CYGWIN)
+	  	target_link_libraries(NP2kai_SDL2_base INTERFACE ${lib_math_libraries} ${lib_vst3sdk_libraries} SDL2::SDL2 SDL2_ttf::SDL2_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries} dxguid mad)
+		else()
+	  	target_link_libraries(NP2kai_SDL2_base INTERFACE ${lib_math_libraries} ${lib_vst3sdk_libraries} SDL2::SDL2 SDL2_ttf::SDL2_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries})
+		endif()
+	elseif(BUILD_SDL AND (USE_SDL EQUAL 3))
+		add_library(NP2kai_SDL3_base INTERFACE)
+		target_sources(NP2kai_SDL3_base INTERFACE ${NP2kai_SDL_sources} ${NP2kai_Thread_sources} ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+		target_compile_definitions(NP2kai_SDL3_base INTERFACE ${NP2kai_SDL_definitions} "USE_SDL=3" "SUPPORT_SDL_AUDIO" ${lib_SDL_ttf_definitions} ${NP2kai_extra_definitions} ${NP2kai_LinkBreak_definitions} ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions} ${libcdio_definitions} ${libusb_1_definitions})
+		target_include_directories(NP2kai_SDL3_base INTERFACE ${LIBCDIO_INCLUDE_DIRS} ${LIBUSB_1_INCLUDE_DIRS} ${lib_vst3sdk_include_dirs})
+		if(MINGW OR MSYS OR CYGWIN)
+	  	target_link_libraries(NP2kai_SDL3_base INTERFACE ${lib_math_libraries} ${lib_vst3sdk_libraries} SDL3::SDL3 SDL3_ttf::SDL3_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries} dxguid mad)
+		else()
+	  	target_link_libraries(NP2kai_SDL3_base INTERFACE ${lib_math_libraries} ${lib_vst3sdk_libraries} SDL3::SDL3 SDL3_ttf::SDL3_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries})
+		endif()
+	endif()
+
+	if(BUILD_X AND (USE_SDL EQUAL 1))
+		add_library(NP2kai_X_SDL1_base INTERFACE)
+		target_sources(NP2kai_X_SDL1_base INTERFACE ${NP2kai_X_sources} ${NP2kai_Thread_sources} ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+		target_compile_definitions(NP2kai_X_SDL1_base INTERFACE ${NP2kai_X_definitions} "USE_SDL=1" "SUPPORT_SDL_AUDIO" ${lib_SDL_ttf_definitions} ${NP2kai_extra_definitions} ${NP2kai_LinkBreak_definitions} ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions} ${GTK2_DEFINITIONS} ${libcdio_definitions} ${libusb_1_definitions} "SYSRESPATH=\"resources\"")
+		target_include_directories(NP2kai_X_SDL1_base INTERFACE ${NP2kai_X_include_dirs} ${lib_glib_include_dirs} ${lib_glibconfig_include_dirs} ${GTK2_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} ${Freetype_INCLUDE_DIRS} ${Fontconfig_INCLUDE_DIRS} ${LIBCDIO_INCLUDE_DIRS} ${LIBUSB_1_INCLUDE_DIRS} ${lib_vst3sdk_include_dirs})
+		target_link_libraries(NP2kai_X_SDL1_base INTERFACE ${lib_math_libraries} ${lib_glib_libraries} ${GTK2_LIBRARIES} ${X11_LIBRARIES} ${Freetype_LIBRARIES} ${Fontconfig_LIBRARIES} ${lib_vst3sdk_libraries} ${lib_Threads_libraries} SDL::SDL SDL_ttf::SDL_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries})
+	elseif(BUILD_X AND (USE_SDL EQUAL 2))
+		add_library(NP2kai_X_SDL2_base INTERFACE)
+		target_sources(NP2kai_X_SDL2_base INTERFACE ${NP2kai_X_sources} ${NP2kai_Thread_sources} ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+		target_compile_definitions(NP2kai_X_SDL2_base INTERFACE ${NP2kai_X_definitions} "USE_SDL=2" "SUPPORT_SDL_AUDIO" ${lib_SDL_ttf_definitions} ${NP2kai_extra_definitions} ${NP2kai_LinkBreak_definitions} ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions} ${GTK2_DEFINITIONS} ${libcdio_definitions} ${libusb_1_definitions} "SYSRESPATH=\"resources\"")
+		target_include_directories(NP2kai_X_SDL2_base INTERFACE ${NP2kai_X_include_dirs} ${lib_glib_include_dirs} ${lib_glibconfig_include_dirs} ${GTK2_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} ${Fontconfig_INCLUDE_DIRS} ${Freetype_INCLUDE_DIRS} ${LIBCDIO_INCLUDE_DIRS} ${LIBUSB_1_INCLUDE_DIRS} ${lib_vst3sdk_include_dirs})
+		target_link_libraries(NP2kai_X_SDL2_base INTERFACE ${lib_math_libraries} ${lib_glib_libraries} ${GTK2_LIBRARIES} ${X11_LIBRARIES} ${Fontconfig_LIBRARIES} ${Freetype_LIBRARIES} ${lib_vst3sdk_libraries} ${lib_Threads_libraries} SDL2::SDL2 SDL2_ttf::SDL2_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries})
+	elseif(BUILD_X AND (USE_SDL EQUAL 3))
+		add_library(NP2kai_X_SDL3_base INTERFACE)
+		target_sources(NP2kai_X_SDL3_base INTERFACE ${NP2kai_X_sources} ${NP2kai_Thread_sources} ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+		target_compile_definitions(NP2kai_X_SDL3_base INTERFACE ${NP2kai_X_definitions} "USE_SDL=3" "SUPPORT_SDL_AUDIO" ${lib_SDL_ttf_definitions} ${NP2kai_extra_definitions} ${NP2kai_LinkBreak_definitions} ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions} ${GTK2_DEFINITIONS} ${libcdio_definitions} ${libusb_1_definitions} "SYSRESPATH=\"resources\"")
+		target_include_directories(NP2kai_X_SDL3_base INTERFACE ${NP2kai_X_include_dirs} ${lib_glib_include_dirs} ${lib_glibconfig_include_dirs} ${GTK2_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} ${Fontconfig_INCLUDE_DIRS} ${Freetype_INCLUDE_DIRS} ${LIBCDIO_INCLUDE_DIRS} ${LIBUSB_1_INCLUDE_DIRS} ${lib_vst3sdk_include_dirs})
+		target_link_libraries(NP2kai_X_SDL3_base INTERFACE ${lib_math_libraries} ${lib_glib_libraries} ${GTK2_LIBRARIES} ${X11_LIBRARIES} ${Fontconfig_LIBRARIES} ${Freetype_LIBRARIES} ${lib_vst3sdk_libraries} ${lib_Threads_libraries} SDL3::SDL3 SDL3_ttf::SDL3_ttf ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_dl_libraries})
+	endif()
+
+	if(BUILD_WX)
+		add_library(NP2kai_WX_base INTERFACE)
+		target_sources(NP2kai_WX_base INTERFACE ${NP2kai_WX_sources} ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+		target_compile_definitions(NP2kai_WX_base INTERFACE ${NP2kai_WX_definitions} ${NP2kai_extra_definitions} ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions} ${libcdio_definitions})
+		# wxWidgets include dirs must come BEFORE NP2kai root to avoid "wx/compiler.h"
+		# collision: wx/cpp.h includes "wx/compiler.h" which would otherwise resolve to
+		# our port header instead of wxWidgets' own header.
+		target_include_directories(NP2kai_WX_base BEFORE INTERFACE ${wxWidgets_INCLUDE_DIRS})
+		target_include_directories(NP2kai_WX_base INTERFACE ${NP2kai_WX_include_dirs} ${lib_tomlplusplus_include_dirs} ${LIBCDIO_INCLUDE_DIRS})
+		target_link_libraries(NP2kai_WX_base INTERFACE ${lib_math_libraries} ${wxWidgets_LIBRARIES} ${lib_tomlplusplus_libraries} SDL3::SDL3 SDL3_ttf::SDL3_ttf ${LIBCDIO_LINK_LIBRARIES} ${lib_dl_libraries})
+	endif()
+
+	if(MSVC_VERSION)
+		add_subdirectory(windows/resources/932)
+		add_subdirectory(windows/resources/936)
+		add_subdirectory(windows/resources/950)
+		add_subdirectory(windows/resources/1252)
+
+		add_library(NP2kai_Windows_base INTERFACE)
+		if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+			target_compile_options(NP2kai_Windows_base INTERFACE /utf-8 /GS /MTd)
+		else()
+			target_compile_options(NP2kai_Windows_base INTERFACE /utf-8 /GS /MT)
+		endif()
+		target_compile_definitions(NP2kai_Windows_base INTERFACE ${NP2kai_Windows_definitions} ${NP2kai_extra_definitions} ${NP2kai_LinkBreak_definitions} ${NP2kai_TickCount_definitions} ${NP2kai_Network_definitions} ${libcdio_definitions} ${libusb_1_definitions})
+		target_include_directories(NP2kai_Windows_base INTERFACE ${NP2kai_Windows_include_dirs} ${LIBCDIO_INCLUDE_DIRS} ${Libusb1_INCLUDE_DIRS} ${lib_vst3sdk_include_dirs})
+		target_sources(NP2kai_Windows_base INTERFACE ${NP2kai_Windows_sources} ${NP2kai_Thread_sources} ${NP2kai_TickCount_sources} ${NP2kai_Network_sources})
+		target_link_directories(NP2kai_Windows_base INTERFACE "${WDK_ROOT}\\Lib\\${WDK_VERSION}\\ucrt\\x64" "${WDK_ROOT}\\Lib\\${WDK_VERSION}\\um\\x64" "${WDK_ROOT}\\Lib\\${WDK_VERSION}\\km\\x64")
+		if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+#			target_link_libraries(NP2kai_Windows_base INTERFACE NP2kai_windows_932 NP2kai_windows_936 NP2kai_windows_950 NP2kai_windows_1252 shlwapi comctl32 atlsd libcmtd libucrtd libvcruntimed libcpmtd dxguid d3d9 ddraw dinput8 dsound ws2_32 ${lib_Threads_libraries} ${LIBUSB_1_LINK_LIBRARIES} ${lib_vst3sdk_libraries})
+			target_link_libraries(NP2kai_Windows_base INTERFACE winmm shlwapi comctl32 atls libcmtd libucrtd libvcruntimed libcpmtd dxguid d3d9 ddraw dinput8 dsound ws2_32 ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_vst3sdk_libraries})
+		else()
+#			target_link_libraries(NP2kai_Windows_base INTERFACE NP2kai_windows_932 NP2kai_windows_936 NP2kai_windows_950 NP2kai_windows_1252 shlwapi comctl32 atls libcmt libucrt libvcruntime libcpmt dxguid d3d9 ddraw dinput8 dsound ws2_32 ${lib_Threads_libraries} ${LIBUSB_1_LIBRARIES} ${lib_vst3sdk_libraries})
+			target_link_libraries(NP2kai_Windows_base INTERFACE winmm shlwapi comctl32 atls libcmt libucrt libvcruntime libcpmt dxguid d3d9 ddraw dinput8 dsound ws2_32 ${LIBCDIO_LINK_LIBRARIES} ${LIBUSB_1_LINK_LIBRARIES} ${lib_vst3sdk_libraries})
+		endif()
+	endif()
+
+endif()
+
+# target
+if(CMAKE_CROSSCOMPILING)
+
+	if(EMSCRIPTEN)
+		set(CMAKE_EXECUTABLE_SUFFIX ".html")
+
+		add_executable(emnp2kai_sdl1 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		target_link_options(emnp2kai_sdl1 PUBLIC "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}")
+		target_link_libraries(emnp2kai_sdl1 PUBLIC NP2kai_base NP2kai_Emscripten_SDL1_base)
+
+		add_executable(emnp21kai_sdl1 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		target_link_options(emnp21kai_sdl1 PUBLIC "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}")
+		target_link_libraries(emnp21kai_sdl1 PUBLIC NP21kai_base NP2kai_Emscripten_SDL1_base)
+
+		add_executable(emnp2kai_sdl2 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		target_link_options(emnp2kai_sdl2 PUBLIC "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}")
+		target_link_libraries(emnp2kai_sdl2 PUBLIC NP2kai_base NP2kai_Emscripten_SDL2_base)
+
+		add_executable(emnp21kai_sdl2 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		target_link_options(emnp21kai_sdl2 PUBLIC "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}")
+		target_link_libraries(emnp21kai_sdl2 PUBLIC NP21kai_base NP2kai_Emscripten_SDL2_base)
+
+		add_executable(emnp2kai "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		target_link_options(emnp2kai PUBLIC "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}")
+		target_link_libraries(emnp2kai PUBLIC NP2kai_base NP2kai_Emscripten_SDL3_base)
+
+		add_executable(emnp21kai "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		target_link_options(emnp21kai PUBLIC "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}")
+		target_link_libraries(emnp21kai PUBLIC NP21kai_base NP2kai_Emscripten_SDL3_base)
+
+		add_executable(emnp21kai_HAXM "${CMAKE_CURRENT_SOURCE_DIR}/sdl/em/main.c")
+		target_link_options(emnp21kai_HAXM PUBLIC "SHELL:-s INITIAL_MEMORY=${NP2kai_Emscripten_MinMemorySize}" "SHELL:-s MAXIMUM_MEMORY=${NP2kai_Emscripten_MaxMemorySize}")
+		target_link_libraries(emnp21kai_HAXM PUBLIC NP21kai_HAXM_base NP2kai_Emscripten_SDL3_base)
+
+		if(NOT BUILD_I286)
+			set_target_properties(emnp2kai_sdl1 emnp2kai_sdl2 emnp2kai PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(emnp21kai_sdl1 emnp21kai_sdl2 emnp21kai emnp21kai_HAXM PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+		if(USE_SDL EQUAL 1)
+			set_target_properties(emnp2kai emnp21kai PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(emnp2kai_sdl1 emnp21kai_sdl1 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+		if(NOT BUILD_HAXM)
+			set_target_properties(emnp21kai_HAXM PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+	endif()
+
+	if(BUILD_OPENDINGUX_GCW0)
+		set(CMAKE_EXECUTABLE_SUFFIX ".opk")
+
+		add_executable(np2kai_gcw0_sdl1 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np2kai_gcw0_sdl1 PUBLIC NP2kai_base NP2kai_gcw0_SDL1_base)
+		add_custom_command(
+			TARGET np2kai_gcw0_sdl1
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk
+			COMMAND mv np2kai_gcw0_sdl1.opk ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Name=NP2kai/Name=NP2kai\(SDL1\)/g' ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk/default_opendingux_np2kai_desktop
+			COMMAND sed -i -e 's/Exec=np2kai/Exec=np2kai_gcw0_sdl1/g' ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk/default_opendingux_np2kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk/default_opendingux_np2kai_desktop ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk/default_opendingux_np2kai_gcw0_sdl1.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np2kai_gcw0_sdl1_opk
+		)
+
+		add_executable(np21kai_gcw0_sdl1 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np21kai_gcw0_sdl1 PUBLIC NP21kai_base NP2kai_gcw0_SDL1_base)
+		add_custom_command(
+			TARGET np21kai_gcw0_sdl1
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk
+			COMMAND mv np21kai_gcw0_sdl1.opk ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Name=NP21kai/Name=NP21kai\(SDL1\)/g' ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Exec=np21kai/Exec=np21kai_gcw0_sdl1/g' ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk/default_opendingux_np21kai_desktop ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk/default_opendingux_np21kai_gcw0_sdl1.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np21kai_gcw0_sdl1_opk
+		)
+
+		add_executable(np2kai_gcw0 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np2kai_gcw0 PUBLIC NP2kai_base NP2kai_gcw0_SDL2_base)
+		add_custom_command(
+			TARGET np2kai_gcw0
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np2kai_gcw0_opk
+			COMMAND mv np2kai_gcw0.opk ${NP2kai_BINARY_DIR}/np2kai_gcw0_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np2kai_gcw0_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Exec=np2kai/Exec=np2kai_gcw0/g' ${NP2kai_BINARY_DIR}/np2kai_gcw0_opk/default_opendingux_np2kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np2kai_gcw0_opk/default_opendingux_np2kai_desktop ${NP2kai_BINARY_DIR}/np2kai_gcw0_opk/default_opendingux_np2kai_gcw0.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np2kai_gcw0_opk ${NP2kai_BINARY_DIR}/np2kai_gcw0.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np2kai_gcw0_opk
+		)
+
+		add_executable(np21kai_gcw0 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np21kai_gcw0 PUBLIC NP21kai_base NP2kai_gcw0_SDL2_base)
+		add_custom_command(
+			TARGET np21kai_gcw0
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np21kai_gcw0_opk
+			COMMAND mv np21kai_gcw0.opk ${NP2kai_BINARY_DIR}/np21kai_gcw0_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np21kai_gcw0_opk/default_opendingux_np2kai_desktop
+			COMMAND sed -i -e 's/Exec=np21kai/Exec=np21kai_gcw0/g' ${NP2kai_BINARY_DIR}/np21kai_gcw0_opk/default_opendingux_np21kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np21kai_gcw0_opk/default_opendingux_np21kai_desktop ${NP2kai_BINARY_DIR}/np21kai_gcw0_opk/default_opendingux_np21kai_gcw0.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np21kai_gcw0_opk ${NP2kai_BINARY_DIR}/np21kai_gcw0.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np21kai_gcw0_opk
+		)
+
+		if(NOT BUILD_I286)
+			set_target_properties(np2kai_gcw0_sdl1 np2kai_gcw0 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+		if(USE_SDL EQUAL 1)
+			set_target_properties(np2kai_gcw0 np21kai_gcw0 PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(np2kai_gcw0_sdl1 np21kai_gcw0_sdl1 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+	endif()
+
+	if(BUILD_OPENDINGUX_RG350)
+		set(CMAKE_EXECUTABLE_SUFFIX ".opk")
+
+		add_executable(np2kai_rg350_sdl1 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np2kai_rg350_sdl1 PUBLIC NP2kai_base NP2kai_rg350_SDL1_base)
+		add_custom_command(
+			TARGET np2kai_rg350_sdl1
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk
+			COMMAND mv np2kai_rg350_sdl1.opk ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Name=NP2kai/Name=NP2kai\(SDL1\)/g' ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np2kai_desktop
+			COMMAND sed -i -e 's/Exec=np2kai/Exec=np2kai_rg350_sdl1/g' ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np2kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np2kai_desktop ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np2kai_rg350_sdl1.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk
+		)
+
+		add_executable(np21kai_rg350_sdl1 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np21kai_rg350_sdl1 PUBLIC NP21kai_base NP2kai_rg350_SDL1_base)
+		add_custom_command(
+			TARGET np21kai_rg350_sdl1
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk
+			COMMAND mv np21kai_rg350_sdl1.opk ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Name=NP21kai/Name=NP21kai\(SDL1\)/g' ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Exec=np21kai/Exec=np21kai_rg350_sdl1/g' ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np21kai_rg350_sdl1_opk/default_opendingux_np21kai_desktop ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk/default_opendingux_np21kai_rg350_sdl1.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np2kai_rg350_sdl1_opk
+		)
+
+		add_executable(np2kai_rg350 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np2kai_rg350 PUBLIC NP2kai_base NP2kai_rg350_SDL2_base)
+		add_custom_command(
+			TARGET np2kai_rg350
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np2kai_rg350_opk
+			COMMAND mv np2kai_rg350.opk ${NP2kai_BINARY_DIR}/np2kai_rg350_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np2kai_rg350_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Exec=np2kai/Exec=np2kai_rg350/g' ${NP2kai_BINARY_DIR}/np2kai_rg350_opk/default_opendingux_np2kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np2kai_rg350_opk/default_opendingux_np2kai_desktop ${NP2kai_BINARY_DIR}/np2kai_rg350_opk/default_opendingux_np2kai_rg350.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np2kai_rg350_opk ${NP2kai_BINARY_DIR}/np2kai_rg350.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np2kai_rg350_opk
+		)
+
+		add_executable(np21kai_rg350 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np21kai_rg350 PUBLIC NP21kai_base NP2kai_rg350_SDL2_base)
+		add_custom_command(
+			TARGET np21kai_rg350
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np21kai_rg350_opk
+			COMMAND mv np21kai_rg350.opk ${NP2kai_BINARY_DIR}/np21kai_rg350_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np21kai_rg350_opk/default_opendingux_np2kai_desktop
+			COMMAND sed -i -e 's/Exec=np21kai/Exec=np21kai_rg350/g' ${NP2kai_BINARY_DIR}/np21kai_rg350_opk/default_opendingux_np21kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np21kai_rg350_opk/default_opendingux_np21kai_desktop ${NP2kai_BINARY_DIR}/np21kai_rg350_opk/default_opendingux_np21kai_rg350.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np21kai_rg350_opk ${NP2kai_BINARY_DIR}/np21kai_rg350.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np21kai_rg350_opk
+		)
+
+		if(NOT BUILD_I286)
+			set_target_properties(np2kai_rg350_sdl1 np2kai_rg350 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+		if(USE_SDL EQUAL 1)
+			set_target_properties(np2kai_rg350 np21kai_rg350 PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(np2kai_rg350_sdl1 np21kai_rg350_sdl1 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+	endif()
+
+	if(BUILD_OPENDINGUX_RS90)
+		set(CMAKE_EXECUTABLE_SUFFIX ".opk")
+
+		add_executable(np2kai_rs90_sdl1 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np2kai_rs90_sdl1 PUBLIC NP2kai_base NP2kai_rs90_SDL1_base)
+		add_custom_command(
+			TARGET np2kai_rs90_sdl1
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk
+			COMMAND mv np2kai_rs90_sdl1.opk ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Name=NP2kai/Name=NP2kai\(SDL1\)/g' ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np2kai_desktop
+			COMMAND sed -i -e 's/Exec=np2kai/Exec=np2kai_rs90_sdl1/g' ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np2kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np2kai_desktop ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np2kai_rs90_sdl1.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk
+		)
+
+		add_executable(np21kai_rs90_sdl1 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np21kai_rs90_sdl1 PUBLIC NP21kai_base NP2kai_rs90_SDL1_base)
+		add_custom_command(
+			TARGET np21kai_rs90_sdl1
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk
+			COMMAND mv np21kai_rs90_sdl1.opk ${NP2kai_BINARY_DIR}/np21kai_rs90_sdl1_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np2kai_desktop
+			COMMAND sed -i -e 's/Name=NP21kai/Name=NP21kai\(SDL1\)/g' ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Exec=np21kai/Exec=np21kai_rs90_sdl1/g' ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np21kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np21kai_desktop ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk/default_opendingux_np21kai_rs90_sdl1.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np2kai_rs90_sdl1_opk
+		)
+
+		add_executable(np2kai_rs90 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np2kai_rs90 PUBLIC NP2kai_base NP2kai_rs90_base)
+		add_custom_command(
+			TARGET np2kai_rs90
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np2kai_rs90_opk
+			COMMAND mv np2kai_rs90.opk ${NP2kai_BINARY_DIR}/np2kai_rs90_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np2kai_rs90_opk/default_opendingux_np21kai_desktop
+			COMMAND sed -i -e 's/Exec=np2kai/Exec=np2kai_rs90/g' ${NP2kai_BINARY_DIR}/np2kai_rs90_opk/default_opendingux_np2kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np2kai_rs90_opk/default_opendingux_np2kai_desktop ${NP2kai_BINARY_DIR}/np2kai_rs90_opk/default_opendingux_np2kai_rs90.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np2kai_rs90_opk ${NP2kai_BINARY_DIR}/np2kai_rs90.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np2kai_rs90_opk
+		)
+
+		add_executable(np21kai_rs90 "${CMAKE_CURRENT_SOURCE_DIR}/sdl/opendingux/main.c")
+		target_link_libraries(np21kai_rs90 PUBLIC NP21kai_base NP2kai_rs90_base)
+		add_custom_command(
+			TARGET np21kai_rs90
+			POST_BUILD
+			COMMENT "Genarate .opk pack."
+			COMMAND cp -r ${NP2kai_SOURCE_DIR}/sdl/opendingux/opk ${NP2kai_BINARY_DIR}/np21kai_rs90_opk
+			COMMAND mv np21kai_rs90.opk ${NP2kai_BINARY_DIR}/np21kai_rs90_opk/
+			COMMAND rm ${NP2kai_BINARY_DIR}/np21kai_rs90_opk/default_opendingux_np2kai_desktop
+			COMMAND sed -i -e 's/Exec=np21kai/Exec=np21kai_rs90/g' ${NP2kai_BINARY_DIR}/np21kai_rs90_opk/default_opendingux_np21kai_desktop
+			COMMAND mv ${NP2kai_BINARY_DIR}/np21kai_rs90_opk/default_opendingux_np21kai_desktop ${NP2kai_BINARY_DIR}/np21kai_rs90_opk/default_opendingux_np21kai_rs90.desktop
+			COMMAND mksquashfs ${NP2kai_BINARY_DIR}/np21kai_rs90_opk ${NP2kai_BINARY_DIR}/np21kai_rs90.opk -all-root -noappend -no-exports
+			COMMAND rm -r ${NP2kai_BINARY_DIR}/np21kai_rs90_opk
+		)
+
+		if(NOT BUILD_I286)
+			set_target_properties(np2kai_rs90_sdl1 np2kai_rs90 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+		if(USE_SDL EQUAL 1)
+			set_target_properties(np2kai_rs90 np21kai_rs90 PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(np2kai_rs90_sdl1 np21kai_rs90_sdl1 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+	endif()
+
+else()
+
+	if(BUILD_SDL)
+		if(NP2kai_Windows)
+			list(APPEND NP2kai_target_include_dirs ${NP2kai_SDL_Windows_include_dirs})
+			list(APPEND NP2kai_target_sources ${NP2kai_SDL_Windows_sources})
+		else()
+			list(APPEND NP2kai_target_include_dirs ${NP2kai_SDL_UNIX_include_dirs})
+			list(APPEND NP2kai_target_sources ${NP2kai_SDL_UNIX_sources})
+		endif()
+
+		add_executable(sdlnp2kai_sdl1 ${NP2kai_target_sources})
+		target_include_directories(sdlnp2kai_sdl1 PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp2kai_sdl1 NP2kai_base NP2kai_SDL1_base)
+
+		add_executable(sdlnp21kai_sdl1 ${NP2kai_target_sources})
+		target_include_directories(sdlnp21kai_sdl1 PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp21kai_sdl1 NP21kai_base NP2kai_SDL1_base)
+
+		add_executable(sdlnp21kai_HAXM_sdl1 ${NP2kai_target_sources})
+		target_include_directories(sdlnp21kai_HAXM_sdl1 PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp21kai_HAXM_sdl1 NP21kai_HAXM_base NP2kai_SDL1_base)
+
+		add_executable(sdlnp2kai_sdl2 ${NP2kai_target_sources})
+		target_include_directories(sdlnp2kai_sdl2 PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp2kai_sdl2 NP2kai_base NP2kai_SDL2_base)
+
+		add_executable(sdlnp21kai_sdl2 ${NP2kai_target_sources})
+		target_include_directories(sdlnp21kai_sdl2 PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp21kai_sdl2 NP21kai_base NP2kai_SDL2_base)
+
+		add_executable(sdlnp21kai_HAXM_sdl2 ${NP2kai_target_sources})
+		target_include_directories(sdlnp21kai_HAXM_sdl2 PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp21kai_HAXM_sdl2 NP21kai_HAXM_base NP2kai_SDL2_base)
+
+		add_executable(sdlnp2kai ${NP2kai_target_sources})
+		target_include_directories(sdlnp2kai PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp2kai NP2kai_base NP2kai_SDL3_base)
+
+		add_executable(sdlnp21kai ${NP2kai_target_sources})
+		target_include_directories(sdlnp21kai PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp21kai NP21kai_base NP2kai_SDL3_base)
+
+		add_executable(sdlnp21kai_HAXM ${NP2kai_target_sources})
+		target_include_directories(sdlnp21kai_HAXM PUBLIC ${NP2kai_target_include_dirs})
+		target_link_libraries(sdlnp21kai_HAXM NP21kai_HAXM_base NP2kai_SDL3_base)
+	endif()
+
+	if(BUILD_X)
+		add_executable(xnp2kai_sdl1 ${NP2kai_X_sources})
+		target_link_libraries(xnp2kai_sdl1 NP2kai_base NP2kai_X_SDL1_base)
+
+		add_executable(xnp21kai_sdl1 ${NP2kai_X_sources})
+		target_link_libraries(xnp21kai_sdl1 NP21kai_base NP2kai_X_SDL1_base)
+
+		add_executable(xnp21kai_HAXM_sdl1 ${NP2kai_X_sources})
+		target_link_libraries(xnp21kai_HAXM_sdl1 NP21kai_HAXM_base NP2kai_X_SDL1_base)
+
+		add_executable(xnp2kai_sdl2 ${NP2kai_X_sources})
+		target_link_libraries(xnp2kai_sdl2 NP2kai_base NP2kai_X_SDL2_base)
+
+		add_executable(xnp21kai_sdl2 ${NP2kai_X_sources})
+		target_link_libraries(xnp21kai_sdl2 NP21kai_base NP2kai_X_SDL2_base)
+
+		add_executable(xnp21kai_HAXM_sdl2 ${NP2kai_X_sources})
+		target_link_libraries(xnp21kai_HAXM_sdl2 NP21kai_HAXM_base NP2kai_X_SDL2_base)
+
+		add_executable(xnp2kai ${NP2kai_X_sources})
+		target_link_libraries(xnp2kai NP2kai_base NP2kai_X_SDL3_base)
+		add_custom_command(
+			TARGET xnp2kai
+			POST_BUILD
+			COMMENT "Genarate xnp2kai man page."
+			COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/x/xnp2kai.man1 ${NP2kai_BINARY_DIR}/xnp2kai.1
+			COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/x/xnp2kai.jman1 ${NP2kai_BINARY_DIR}/xnp2kai.1j
+		)
+
+		add_executable(xnp21kai ${NP2kai_X_sources})
+		target_link_libraries(xnp21kai NP21kai_base NP2kai_X_SDL3_base)
+		add_custom_command(
+			TARGET xnp21kai
+			POST_BUILD
+			COMMENT "Genarate xnp21kai man page."
+			COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/x/xnp21kai.man1 ${NP2kai_BINARY_DIR}/xnp21kai.1
+			COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/x/xnp21kai.jman1 ${NP2kai_BINARY_DIR}/xnp21kai.1j
+		)
+
+		add_executable(xnp21kai_HAXM ${NP2kai_X_sources})
+		target_link_libraries(xnp21kai_HAXM NP21kai_HAXM_base NP2kai_X_SDL3_base)
+	endif()
+
+	if(BUILD_SDL)
+		if(NOT BUILD_I286)
+			set_target_properties(sdlnp2kai_sdl1 sdlnp2kai_sdl2 sdlnp2kai PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(sdlnp21kai_sdl1 sdlnp21kai_sdl2 sdlnp21kai sdlnp21kai_HAXM_sdl1 sdlnp21kai_HAXM_sdl2 sdlnp21kai_HAXM PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+		if(USE_SDL EQUAL 1)
+			set_target_properties(sdlnp2kai sdlnp2kai_sdl2 sdlnp21kai sdlnp21kai_sdl2 sdlnp21kai_HAXM sdlnp21kai_HAXM_sdl2 PROPERTIES EXCLUDE_FROM_ALL true)
+		elseif(USE_SDL EQUAL 2)
+			set_target_properties(sdlnp2kai sdlnp2kai_sdl1 sdlnp21kai sdlnp21kai_sdl1 sdlnp21kai_HAXM sdlnp21kai_HAXM_sdl1 PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(sdlnp2kai_sdl1 sdlnp2kai_sdl2 sdlnp21kai_sdl1 sdlnp21kai_sdl2 sdlnp21kai_HAXM_sdl1 sdlnp21kai_HAXM_sdl2 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+	endif()
+
+	if(BUILD_X)
+		if(NOT BUILD_I286)
+			set_target_properties(xnp2kai_sdl1 xnp2kai_sdl2 xnp2kai PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(xnp21kai_sdl1 xnp21kai_sdl2 xnp21kai xnp21kai_HAXM_sdl1 xnp21kai_HAXM_sdl2 xnp21kai_HAXM PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+		if(USE_SDL EQUAL 1)
+			set_target_properties(xnp2kai xnp2kai_sdl2 xnp21kai xnp21kai_sdl2 xnp21kai_HAXM xnp21kai_HAXM_sdl2 PROPERTIES EXCLUDE_FROM_ALL true)
+		elseif(USE_SDL EQUAL 2)
+			set_target_properties(xnp2kai xnp2kai_sdl1 xnp21kai xnp21kai_sdl1 xnp21kai_HAXM xnp21kai_HAXM_sdl1 PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(xnp2kai_sdl1 xnp2kai_sdl2 xnp21kai_sdl1 xnp21kai_sdl2 xnp21kai_HAXM_sdl1 xnp21kai_HAXM_sdl2 PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+	endif()
+
+	if(NOT BUILD_HAXM)
+		if(BUILD_SDL)
+			set_target_properties(sdlnp21kai_HAXM_sdl1 sdlnp21kai_HAXM_sdl2 sdlnp21kai_HAXM PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+		if(BUILD_X)
+			set_target_properties(xnp21kai_HAXM_sdl1 xnp21kai_HAXM_sdl2 xnp21kai_HAXM PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+	endif()
+
+	if(BUILD_WX)
+		add_executable(wxnp2kai ${NP2kai_WX_sources})
+		target_link_libraries(wxnp2kai NP2kai_base NP2kai_WX_base)
+		add_custom_command(
+			TARGET wxnp2kai
+			POST_BUILD
+			COMMENT "Generate wxnp2kai man page."
+			COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/wx/wxnp2kai.man1 ${NP2kai_BINARY_DIR}/wxnp2kai.1
+			COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/wx/wxnp2kai.jman1 ${NP2kai_BINARY_DIR}/wxnp2kai.1j
+		)
+
+		add_executable(wxnp21kai ${NP2kai_WX_sources})
+		target_link_libraries(wxnp21kai NP21kai_base NP2kai_WX_base)
+		add_custom_command(
+			TARGET wxnp21kai
+			POST_BUILD
+			COMMENT "Generate wxnp21kai man page."
+			COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/wx/wxnp21kai.man1 ${NP2kai_BINARY_DIR}/wxnp21kai.1
+			COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/wx/wxnp21kai.jman1 ${NP2kai_BINARY_DIR}/wxnp21kai.1j
+		)
+
+		if(BUILD_HAXM AND NOT BUILD_I286)
+			add_executable(wxnp21kai_HAXM ${NP2kai_WX_sources})
+			target_link_libraries(wxnp21kai_HAXM NP21kai_HAXM_base NP2kai_WX_base)
+			add_custom_command(
+				TARGET wxnp21kai_HAXM
+				POST_BUILD
+				COMMENT "Generate wxnp21kai_HAXM man page."
+				COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/wx/wxnp21kai.man1 ${NP2kai_BINARY_DIR}/wxnp21kai_HAXM.1
+				COMMAND ${CMAKE_COMMAND} -E copy ${NP2kai_SOURCE_DIR}/wx/wxnp21kai.jman1 ${NP2kai_BINARY_DIR}/wxnp21kai_HAXM.1j
+			)
+		endif()
+
+		if(NOT BUILD_I286)
+			set_target_properties(wxnp2kai PROPERTIES EXCLUDE_FROM_ALL true)
+		else()
+			set_target_properties(wxnp21kai PROPERTIES EXCLUDE_FROM_ALL true)
+			if(BUILD_HAXM)
+				set_target_properties(wxnp21kai_HAXM PROPERTIES EXCLUDE_FROM_ALL true)
+			endif()
+		endif()
+		if(NOT BUILD_HAXM AND NOT BUILD_I286)
+			# Ensure we don't try to build wxnp21kai_HAXM if HAXM is disabled
+		endif()
+	endif()
+
+	if((UNIX OR MINGW OR MSYS OR CYGWIN OR CMAKE_HOST_APPLE) AND NOT BUILD_SDL AND NOT BUILD_X AND NOT BUILD_WX)
+		message(FATAL_ERROR "Nothing build target.")
+	endif()
+
+	if(BUILD_SDL)
+		get_target_property(NP2kai_temp sdlnp2kai_sdl1 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp2kai_sdl1 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp2kai_sdl1 CONFIGURATIONS Release COMPONENT Release)
+		endif()
+		get_target_property(NP2kai_temp sdlnp21kai_sdl1 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp21kai_sdl1 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp21kai_sdl1 CONFIGURATIONS Release COMPONENT Release)
+		endif()
+		get_target_property(NP2kai_temp sdlnp21kai_HAXM_sdl1 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp21kai_HAXM_sdl1 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp21kai_HAXM_sdl1 CONFIGURATIONS Release COMPONENT Release)
+		endif()
+		get_target_property(NP2kai_temp sdlnp2kai_sdl2 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp2kai_sdl2 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp2kai_sdl2 CONFIGURATIONS Release COMPONENT Release)
+		endif()
+		get_target_property(NP2kai_temp sdlnp21kai_sdl2 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp21kai_sdl2 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp21kai_sdl2 CONFIGURATIONS Release COMPONENT Release)
+		endif()
+		get_target_property(NP2kai_temp sdlnp21kai_HAXM_sdl2 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp21kai_HAXM_sdl2 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp21kai_HAXM_sdl2 CONFIGURATIONS Release COMPONENT Release)
+		endif()
+		get_target_property(NP2kai_temp sdlnp2kai EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp2kai CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp2kai CONFIGURATIONS Release COMPONENT Release)
+		endif()
+		get_target_property(NP2kai_temp sdlnp21kai EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp21kai CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp21kai CONFIGURATIONS Release COMPONENT Release)
+		endif()
+		get_target_property(NP2kai_temp sdlnp21kai_HAXM EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS sdlnp21kai_HAXM CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS sdlnp21kai_HAXM CONFIGURATIONS Release COMPONENT Release)
+		endif()
+	endif()
+
+	if(BUILD_X)
+		get_target_property(NP2kai_temp xnp2kai_sdl1 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp2kai_sdl1 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp2kai_sdl1 CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp xnp21kai_sdl1 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp21kai_sdl1 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp21kai_sdl1 CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp xnp21kai_HAXM_sdl1 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp21kai_HAXM_sdl1 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp21kai_HAXM_sdl1 CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp xnp2kai_sdl2 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp2kai_sdl2 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp2kai_sdl2 CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp xnp21kai_sdl2 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp21kai_sdl2 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp21kai_sdl2 CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp xnp21kai_HAXM_sdl2 EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp21kai_HAXM_sdl2 CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp21kai_HAXM_sdl2 CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp xnp2kai EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp2kai CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp2kai CONFIGURATIONS Release COMPONENT Release)
+			install(FILES ${NP2kai_BINARY_DIR}/xnp2kai.1 ${NP2kai_BINARY_DIR}/xnp2kai.1j TYPE MAN CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(FILES ${NP2kai_BINARY_DIR}/xnp2kai.1 ${NP2kai_BINARY_DIR}/xnp2kai.1j TYPE MAN CONFIGURATIONS Release COMPONENT Release)
+			install(FILES ${NP2kai_SOURCE_DIR}/x/resources/xnp2kai.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(FILES ${NP2kai_SOURCE_DIR}/x/resources/xnp2kai.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp xnp21kai EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp21kai CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp21kai CONFIGURATIONS Release COMPONENT Release)
+			install(FILES ${NP2kai_BINARY_DIR}/xnp21kai.1 ${NP2kai_BINARY_DIR}/xnp21kai.1j TYPE MAN CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(FILES ${NP2kai_BINARY_DIR}/xnp21kai.1 ${NP2kai_BINARY_DIR}/xnp21kai.1j TYPE MAN CONFIGURATIONS Release COMPONENT Release)
+			install(FILES ${NP2kai_SOURCE_DIR}/x/resources/xnp21kai.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(FILES ${NP2kai_SOURCE_DIR}/x/resources/xnp21kai.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp xnp21kai_HAXM EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS xnp21kai_HAXM CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS xnp21kai_HAXM CONFIGURATIONS Release COMPONENT Release)
+			install(FILES ${NP2kai_SOURCE_DIR}/x/resources/xnp21kai_HAXM.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(FILES ${NP2kai_SOURCE_DIR}/x/resources/xnp21kai_HAXM.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+	endif()
+
+	if(GUI_MISC_INSTALL)
+		install(FILES ${NP2kai_SOURCE_DIR}/misc/np2.svg DESTINATION ${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/scalable/apps CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+		install(FILES ${NP2kai_SOURCE_DIR}/misc/np2.svg DESTINATION ${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/scalable/apps CONFIGURATIONS Release COMPONENT Release)
+	endif()
+
+	if(BUILD_WX)
+		get_target_property(NP2kai_temp wxnp2kai EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS wxnp2kai CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS wxnp2kai CONFIGURATIONS Release COMPONENT Release)
+			install(FILES ${NP2kai_BINARY_DIR}/wxnp2kai.1 ${NP2kai_BINARY_DIR}/wxnp2kai.1j TYPE MAN CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(FILES ${NP2kai_BINARY_DIR}/wxnp2kai.1 ${NP2kai_BINARY_DIR}/wxnp2kai.1j TYPE MAN CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		get_target_property(NP2kai_temp wxnp21kai EXCLUDE_FROM_ALL)
+		if(NOT NP2kai_temp)
+			install(TARGETS wxnp21kai CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(TARGETS wxnp21kai CONFIGURATIONS Release COMPONENT Release)
+			install(FILES ${NP2kai_BINARY_DIR}/wxnp21kai.1 ${NP2kai_BINARY_DIR}/wxnp21kai.1j TYPE MAN CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+			install(FILES ${NP2kai_BINARY_DIR}/wxnp21kai.1 ${NP2kai_BINARY_DIR}/wxnp21kai.1j TYPE MAN CONFIGURATIONS Release COMPONENT Release)
+			set(GUI_MISC_INSTALL ON)
+		endif()
+		if(BUILD_HAXM)
+			get_target_property(NP2kai_temp wxnp21kai_HAXM EXCLUDE_FROM_ALL)
+			if(NOT NP2kai_temp)
+				install(TARGETS wxnp21kai_HAXM CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+				install(TARGETS wxnp21kai_HAXM CONFIGURATIONS Release COMPONENT Release)
+				install(FILES ${NP2kai_BINARY_DIR}/wxnp21kai_HAXM.1 ${NP2kai_BINARY_DIR}/wxnp21kai_HAXM.1j TYPE MAN CONFIGURATIONS RelWithDebInfo COMPONENT RelWithDebInfo)
+				install(FILES ${NP2kai_BINARY_DIR}/wxnp21kai_HAXM.1 ${NP2kai_BINARY_DIR}/wxnp21kai_HAXM.1j TYPE MAN CONFIGURATIONS Release COMPONENT Release)
+				set(GUI_MISC_INSTALL ON)
+			endif()
+		endif()
+	endif()
+
+	if(MSVC)
+		add_executable(NP2kai_windows WIN32 ${NP2kai_Windows_sources})
+		target_link_libraries(NP2kai_windows NP2kai_base NP2kai_Windows_base)
+
+		add_executable(NP21kai_windows WIN32 ${NP2kai_Windows_sources})
+		target_link_libraries(NP21kai_windows NP21kai_base NP2kai_Windows_base)
+
+		add_executable(NP21kai_HAXM_windows WIN32 ${NP2kai_Windows_sources})
+		target_link_libraries(NP21kai_HAXM_windows NP21kai_HAXM_base NP2kai_Windows_base)
+
+		if(BUILD_DLL)
+			add_library(NP2kai_dll SHARED ${NP2kai_Windows_sources})
+			target_link_libraries(NP2kai_dll NP2kai_base NP2kai_Windows_base)
+			set_target_properties(NP2kai_dll PROPERTIES OUTPUT_NAME "NP2kai")
+
+			add_library(NP21kai_dll SHARED ${NP2kai_Windows_sources})
+			target_link_libraries(NP21kai_dll NP21kai_base NP2kai_Windows_base)
+			set_target_properties(NP21kai_dll PROPERTIES OUTPUT_NAME "NP21kai")
+		endif()
+
+		if(NOT BUILD_I286)
+			set_target_properties(NP2kai_windows PROPERTIES EXCLUDE_FROM_ALL true)
+			if(BUILD_DLL)
+				set_target_properties(NP2kai_dll PROPERTIES EXCLUDE_FROM_ALL true)
+			endif()
+		else()
+			set_target_properties(NP21kai_windows PROPERTIES EXCLUDE_FROM_ALL true)
+			set_target_properties(NP21kai_HAXM_windows PROPERTIES EXCLUDE_FROM_ALL true)
+			if(BUILD_DLL)
+				set_target_properties(NP21kai_dll PROPERTIES EXCLUDE_FROM_ALL true)
+			endif()
+		endif()
+		if(NOT BUILD_HAXM)
+			set_target_properties(NP21kai_HAXM_windows PROPERTIES EXCLUDE_FROM_ALL true)
+		endif()
+	endif()
+
+endif()

@@ -1,0 +1,18 @@
+{
+    "name": "np2 TAB5",
+    "description": "PC-9801 emulator for the M5Stack Tab5, based on NP2kai. A compatible BIOS and font are built in, so it boots from a blank microSD card - put disk images in the card's root and pick them from the on-screen menu. USB and Bluetooth LE keyboard and mouse, the touch panel as the PC-98 mouse, screenshots to PNG, and USB modes that show the SD card or the mounted hard disk image to a PC.",
+    "keywords": "PC-9801, PC-98, emulator, NP2kai, retro, ESP32-P4, Tab5",
+    "author": "mochimochi-man / Uh",
+    "repository": "https://github.com/mochimochi-man/np2_TAB5",
+    "firmware_category": [
+        {
+            "TAB5": {
+                "path": "firmware",
+                "device": ["TAB5"],
+                "default_baud": 921600
+            }
+        }
+    ],
+    "version": "1.0.0",
+    "framework": "ESP-IDF"
+}

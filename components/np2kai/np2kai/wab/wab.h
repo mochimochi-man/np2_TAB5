@@ -1,0 +1,107 @@
+/**
+ * @file	wab.h
+ * @brief	Window Accelerator Board Interface
+ *
+ * @author	$Author: SimK $
+ */
+
+#pragma once
+
+#if defined(NP2_X)
+#include <gtk/gtk.h>
+#endif
+
+// 最低限確保する画面サイズ
+#define WAB_RESERVED_WIDTH	640
+#define WAB_RESERVED_HEIGHT	480
+// 動的確保できる最大画面サイズ
+#define WAB_MAX_WIDTH	4096
+#define WAB_MAX_HEIGHT	4096
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+	
+typedef struct {
+	int		posx;
+	int		posy;
+	int		multiwindow;
+	int		multithread;
+	int		halftone;
+	int		forcevga;
+	int		readonly; // from np2oscfg
+} NP2WABCFG;
+
+typedef int(*NP2WAB_DrawFrame)(void);
+typedef struct {
+	REG8 relay; // 画面出力リレー状態（bit0=内蔵ウィンドウアクセラレータ, bit1=RGB INスルー, それ以外のビットはReserved。bit0,1が00で98グラフィック
+	REG8 paletteChanged; // パレット要更新フラグ
+	int realWidth; // 画面解像度(幅)
+	int realHeight; // 画面解像度(高さ)
+	int wndWidth; // 描画領域サイズ(幅)
+	int wndHeight; // 描画領域サイズ(高さ)
+	int fps; // リフレッシュレート（大体合わせてくれるかもしれない･･･けど現時点で何もしていない）
+	int lastWidth; // 前回のウィンドウアクセラレータの横解像度（デバイス再作成判定用）
+	int lastHeight; // 前回のウィンドウアクセラレータの横解像度（デバイス再作成判定用）
+	
+	int	relaystateint;
+	int	relaystateext;
+
+	int vramoffs;
+} NP2WAB;
+
+typedef struct {
+	int multiwindow; // 別窓モード
+	int ready; // 0以外なら描いても良いよ
+#if defined(NP2_WIN)
+	HWND hWndMain; // メインウィンドウのハンドル
+	HWND hWndWAB; // ウィンドウアクセラレータ別窓のハンドル
+	HDC hDCWAB; // ウィンドウアクセラレータ別窓のHDC
+	HBITMAP hBmpBuf; // バッファビットマップ（常に等倍）
+	HDC     hDCBuf; // バッファのHDC
+#elif defined(NP2_X)
+	GtkWidget *pWABWnd;
+	GdkPixbuf *pPixbuf;
+#else
+	unsigned int* pBuffer;
+#endif
+	NP2WAB_DrawFrame drawframe; // 画面描画関数。hDCBufにアクセラレータ画面データを転送する。
+	int curWidth; // 実際に確保済み領域サイズ(幅)
+	int curHeight; // 実際に確保済み領域サイズ(高さ)
+#if defined(_WIN32)
+        HGDIOBJ hBmpOld;
+#endif
+} NP2WABWND;
+
+#if defined(NP2_WIN)
+void np2wab_init(HINSTANCE hInstance, HWND g_hWndMain);
+#else
+void np2wab_init(void);
+#endif
+void np2wab_reset(const NP2CFG *pConfig);
+void np2wab_bind(void);
+void np2wab_drawframe(void);
+void np2wab_shutdown(void);
+
+void np2wab_setRelayState(REG8 state);
+void np2wab_setScreenSize(int width, int height);
+void np2wab_setScreenSizeMT(int width, int height);
+
+void wabwin_readini(void);
+void wabwin_writeini(void);
+
+void np2wab_forceupdate(void);
+
+void np2wab_setDirtyRect(RECT r);
+
+extern NP2WAB		np2wab;
+extern NP2WABCFG	np2wabcfg;
+extern NP2WABWND	np2wabwnd;
+//
+//extern int		np2wab.relaystateint;
+//extern int		np2wab.relaystateext;
+
+#ifdef __cplusplus
+}
+#endif
+

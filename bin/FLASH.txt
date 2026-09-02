@@ -1,0 +1,42 @@
+np2_TAB5 - M5Stack Tab5 (ESP32-P4)
+
+The image is self-contained: the compatible BIOS and font are inside
+np2_espresso.bin, so a blank SD card is enough to boot. Disk images are the
+only thing the card needs to carry.
+
+--- a single image, for M5Burner or any tool that writes offset 0 -------------
+
+  ../firmware/np2_TAB5_0x0.bin      write to 0x0
+
+  It lives in firmware/ rather than here because that is the layout M5Burner's
+  community repository expects, and the address is part of the file name there.
+
+--- the four parts, for esptool ----------------------------------------------
+
+  esptool --chip esp32p4 -p <PORT> -b 921600 write-flash \
+      --flash-mode qio --flash-freq 80m --flash-size 16MB \
+      0x2000  bootloader.bin \
+      0x8000  partition-table.bin \
+      0xe000  ota_data_initial.bin \
+      0x10000 np2_espresso.bin
+
+The flash mode is qio and the bootloader must be written with it: the app alone
+at 0x10000 will run, but from a dio-mode bootloader, and the emulator is
+measurably slower for it.
+
+--- a clean install ----------------------------------------------------------
+
+Settings (disk selection, CPU clock, backlight, volume, Bluetooth pairings) live
+in NVS and survive a reflash. To start from nothing:
+
+  esptool --chip esp32p4 -p <PORT> erase-flash
+
+then write as above. To clear only the settings and keep the firmware:
+
+  esptool --chip esp32p4 -p <PORT> erase-region 0x9000 0x5000
+
+--- rebuilding ---------------------------------------------------------------
+
+Needs ESP-IDF v5.5. `idf.py build` pulls the managed components back down at the
+versions in dependencies.lock; they are left out of this archive only for size.
+The binaries above were built from exactly this tree.

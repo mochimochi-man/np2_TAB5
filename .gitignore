@@ -1,0 +1,37 @@
+# ESP-IDF build output
+build/
+build_*/
+managed_components/
+sdkconfig.old
+*.elf
+*.map
+
+# Binaries are build output as a rule...
+*.bin
+
+# ...but the released firmware is part of what this repository is for, and
+# M5Burner's community repository format requires firmware/ to hold the image
+# it flashes. Without these two exceptions `git add` silently drops them and
+# the submission has nothing to install.
+!firmware/*.bin
+!bin/*.bin
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+
+# AI
+.claude/
+.gemini/
+.codex/
+AI.md
+CLAUDE.md
+GEMINI.md
+AGENTS.md

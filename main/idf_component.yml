@@ -1,0 +1,41 @@
+dependencies:
+  idf: ">=5.5"
+  # The board support package carries the ILI9881C MIPI-DSI panel, the GT911
+  # touch controller, the two I/O expanders, the SDMMC wiring and the audio
+  # codec. Taking it whole is what makes this port tractable: none of that
+  # hardware is guessable without the schematic.
+  espressif/m5stack_tab5: "*"
+  # Pinned, and only because the BSP hard-requires it — this port never calls
+  # into LVGL (the emulator writes the DPI frame buffer directly). 2.8.0 and
+  # later assume that from ESP-IDF 5.5.0 the DSI callback field is named
+  # on_frame_buf_complete; in the 5.5.0 here it is still on_refresh_done, so
+  # they do not compile. Anything before that guard is fine, and since none of
+  # this code runs, the version only has to build.
+  espressif/esp_lvgl_port: "~2.6.0"
+  # USB HID host for a keyboard on the USB-A port.
+  espressif/usb_host_hid: "^1.0.0"
+  # USB Mode's device stack. The raw component, not esp_tinyusb — see
+  # main/tusb_config.h for why.
+  espressif/tinyusb: "^0.21.0"
+  #
+  # NOTE: no arduino-esp32 here, unlike the ESP32-S3 forks. It was used for
+  # ESP.getFreeHeap(), initArduino() and SD.exists() and nothing else, and on
+  # the P4 it drags in esp_hosted/esp_wifi_remote for the radio that lives on
+  # the companion ESP32-C6. Those calls are replaced with their IDF equivalents.
+  # Espressif's own ST7121 driver. This board's panel is an ST7121 and the BSP
+  # only knows ILI9881C and ST7123, so the vendor init sequence and the DPI
+  # timings come from here rather than being hand-carried.
+  espressif/esp_lcd_st7121: "*"
+  # Bluetooth. The ESP32-P4 has no radio: the controller runs on the companion
+  # ESP32-C6 and is reached over SDIO. 2.x rather than 3.x deliberately - the
+  # co-processor firmware M5 ships answers 2.x's virtual-HCI path but not the
+  # RPC 3.x uses to start its BT controller. See bt_hid.cpp.
+  espressif/esp_hosted: "~2.12"
+  espressif/esp_wifi_remote: "*"
+  # Greaseweazle is a USB CDC-ACM device on the USB-A port (see gw_mode.cpp).
+  espressif/usb_host_cdc_acm: "^2.4"
+  # The other Tab5 panel. Pulled in by the BSP already, named here
+  # because panel_tab5.cpp drives it directly (see bringup_st7123).
+  espressif/esp_lcd_st7123: "*"
+  # The first-revision Tab5 panel, likewise driven directly.
+  espressif/esp_lcd_ili9881c: "*"

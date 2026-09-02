@@ -1,0 +1,42 @@
+NP2 kai開発ノート by AZO
+===
+
+・GARUDIUS'95 タイトル表示 下部の表示が（16ライン？）欠落
+  Anex86はOK、T98-Nextは同様
+
+  => 実機でも欠落する。
+
+・ツーショットダイアリー BEEP 音声
+  np2/fmgenでiniファイル内にBEEP_PCM=2とするとすごく綺麗。
+
+  タイマ資料 <- BEEP周波数に使用される
+  http://www.webtech.co.jp/company/doc/undocumented_mem/io_tcu.txt
+
+  => 対応。他のゲームでBEEPが変になるかも。
+     結子（一番右上のOL）のOPの音声タイミングがずれる。
+
+  => BEEP PCMを再度、修正。ズレが無くなった。
+
+・トキオの声が低い
+
+  => モードレジスタ0x77に、0x70->0x50 の順に書かれたら、
+     トキオ用の周期にするように突貫対応。
+
+  => BEEP PCMを再度、修正。
+
+・NFDを起動できない
+
+  LOADINTELWORDマクロが変な値を取得する
+
+  => common.h にて、a を UINT8* にキャストするよう修正。
+
+・ERCACHE.EXEの組み込み時にtriple fault発生
+
+  => http://egg.2ch.net/test/read.cgi/software/1500009461/181-203
+     の修正。
+
+・VEM486 + Turbo C++ 4J（のTC.EXE）でtriple fault発生
+
+・DIPスイッチ2、bit7 GDC の初期を 2.5MHz にした。
+
+・Android版にて、USBメモリのファイルを認識しない。　未確認

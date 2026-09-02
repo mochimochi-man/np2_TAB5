@@ -1,0 +1,37 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: 東雲フォント
+Upstream-Author: Yasuyuki Furukawa <yasu@on.cs.keio.ac.jp>
+Source: http://openlab.ring.gr.jp/efont/shinonome/
+
+Files: *
+Copyright: Yasuyuki Furukawa <yasu@on.cs.keio.ac.jp>
+           2001-2004 /efont/ Project.
+License: Public-Domain
+ このアーカイブに含まれるすべてのフォントデータ、ドキュメント、スクリプ
+ ト類はすべて Public Domain で提供されています 。
+ .
+ 但し、日本に於いては現時点で著作権を放棄することは法律上不可能であり、
+ AUTHORS に列挙されている作者がその権利を行使しないと宣言することで実質
+ 的な Public Domain であるとします。
+ .
+ 自由な改造、他フォーマットへの変換、組込み、再配布を行うことができます。
+ 同時に、これらはすべて完全に無保証です。
+
+Files: debian/*
+Copyright: 2015-2018 Hideki Yamane <henrich@debian.org>
+License: GPL-2+
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>
+ .
+ On Debian systems, the complete text of the GNU General
+ Public License version 2 can be found in "/usr/share/common-licenses/GPL-2".

@@ -1,0 +1,112 @@
+#if defined(SUPPORT_NP2_TICKCOUNT)
+
+#include <np2_tickcount.h>
+#include <time.h>
+#if defined(__LIBRETRO__)
+#include <features/features_cpu.h>
+#endif
+
+static int64_t initcount;
+#if defined(__LIBRETRO__)
+static int64_t inittime;
+static int64_t lastcount;
+static int64_t lasttime;
+#endif
+
+int64_t NP2_TickCount_GetCount(void) {
+#if defined(NP2_WIN)
+  LARGE_INTEGER count;
+  QueryPerformanceCounter(&count);
+  return count.QuadPart;
+#elif defined(USE_SDL)
+#if USE_SDL_VERSION >= 2
+  return SDL_GetPerformanceCounter();
+#else
+  return SDL_GetTicks();
+#endif
+#elif defined(__LIBRETRO__)
+  lastcount = cpu_features_get_perf_counter();
+  lasttime = cpu_features_get_time_usec();
+  return lastcount;
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1000000000 + ts.tv_nsec;
+#endif
+}
+
+int64_t NP2_TickCount_GetFrequency(void) {
+#if defined(NP2_WIN)
+  LARGE_INTEGER freq;
+  QueryPerformanceFrequency(&freq);
+  return freq.QuadPart;
+#elif defined(USE_SDL)
+#if USE_SDL_VERSION >= 2
+  return SDL_GetPerformanceFrequency();
+#else
+  return 100000000;
+#endif
+#elif defined(__LIBRETRO__)
+  int64_t nowcount = cpu_features_get_perf_counter();
+  int64_t nowtime = cpu_features_get_time_usec();
+  int64_t ret;
+  if(nowtime > lasttime) {
+    ret = ((nowcount - lastcount) / (nowtime - lasttime)) * 1000000;
+  } else {
+    ret = 0;
+  }
+  lastcount = nowtime;
+  lasttime = nowtime;
+  return ret;
+#else
+  struct timespec res;
+  clock_getres(CLOCK_MONOTONIC, &res);
+  return 1000000000 / (res.tv_sec * 1000000000 + res.tv_nsec);
+#endif
+}
+
+void NP2_TickCount_Initialize(void) {
+  initcount = NP2_TickCount_GetCount();
+#if defined(__LIBRETRO__)
+  inittime = cpu_features_get_time_usec();
+  lastcount = initcount;
+  lasttime = inittime;
+#endif
+}
+
+int64_t NP2_TickCount_GetCountFromInit(void) {
+  return NP2_TickCount_GetCount() - initcount;
+}
+
+#if !defined(_WINDOWS) && defined(SUPPORT_NP2_TICKCOUNT)
+BOOL QueryPerformanceCounter(LARGE_INTEGER* count) {
+  int64_t icount = NP2_TickCount_GetCount();
+  COPY64(count, &icount);
+  return TRUE;
+}
+BOOL QueryPerformanceFrequency(LARGE_INTEGER* freq) {
+  int64_t ifreq = NP2_TickCount_GetFrequency();
+  COPY64(freq, &ifreq);
+  return TRUE;
+}
+
+/* Cross-platform stand-ins for the Windows tickcounter API used by HAXM. */
+int GetTickCounterMode(void) {
+  return 3; /* TCMODE_PERFORMANCECOUNTER */
+}
+LARGE_INTEGER GetTickCounter_Clock(void) {
+  LARGE_INTEGER li;
+  int64_t v = NP2_TickCount_GetCount();
+  COPY64(&li, &v);
+  return li;
+}
+LARGE_INTEGER GetTickCounter_ClockPerSec(void) {
+  LARGE_INTEGER li;
+  int64_t v = NP2_TickCount_GetFrequency();
+  COPY64(&li, &v);
+  return li;
+}
+#endif
+
+#endif  // SUPPORT_NP2_TICKCOUNT
+
