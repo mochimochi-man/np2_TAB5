@@ -1,6 +1,12 @@
 np2 TAB5
 
 
+1.0.1   2026-09-05
+
+  - Fixed: the built-in BIOS was not running, and NP2kai's own emulated BIOS
+    was standing in for it.
+
+
 1.0.0   2026-09-03   first release
 
   PC-9801 emulator for the M5Stack Tab5 (ESP32-P4). Forked from np2 espresso,

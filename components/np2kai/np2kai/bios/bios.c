@@ -83,7 +83,11 @@ static void trace_fmt_ex(const char *fmt, ...)
 
 #define	BIOS_SIMULATE
 
-static const char neccheck[] = "Copyright (C) 1983 by NEC Corporation";
+/* NEC's own MS-DOS identifies the machine from a signature in the BIOS window
+   and will not run without it - that is how it keeps itself off EPSON
+   machines. The compatible BIOS built into this firmware does not carry one,
+   so a BIOS.ROM dumped from an NEC machine is needed to run that DOS. EPSON
+   DOS, and everything that does not check, are unaffected. */
 
 typedef struct {
 	UINT8	port;
@@ -474,6 +478,25 @@ void bios_initialize(void) {
 		   size: with two candidate files on the card this is the first thing
 		   worth knowing when the machine does not come up. */
 		ets_printf("biosrom: %s -> %s\n", path, biosrom ? "loaded" : "REJECTED/absent");
+
+		/* A file that opens but is not 0x18000 bytes used to end up here with
+		   biosrom still FALSE, and fall out of the bottom of the test below into
+		   np2's own emulated BIOS - which is neither what the menu offered nor
+		   something it can ask for. The fallback above only fires when the file
+		   will not open, so a wrong size had nothing to catch it, and the BIOS
+		   built into this firmware was quietly not the one running.
+
+		   So the size failure falls back the same way an open failure does. */
+		if ((!biosrom) && (path[0] != ':')) {
+			OEMSPRINTF(path, OEMTEXT("%s"), OEMTEXT(":builtin/BIOS.ROM"));
+			fh = file_open_rb(path);
+			if (fh != FILEH_INVALID) {
+				biosrom = (file_read(fh, mem + 0x0e8000, 0x18000) == 0x18000);
+				file_close(fh);
+			}
+			ets_printf("biosrom: wrong size, using %s -> %s\n",
+			           path, biosrom ? "loaded" : "REJECTED/absent");
+		}
 	}
 	if (biosrom) {
 		TRACEOUT(("load bios.rom"));
@@ -492,7 +515,6 @@ void bios_initialize(void) {
 	else {
 		CopyMemory(mem + 0x0e8000, nosyscode, sizeof(nosyscode));
 		if ((!biosrom) && (!(pccore.model & PCMODEL_EPSON))) {
-			CopyMemory(mem + 0xe8dd8, neccheck, 0x25);
 			pos = LOADINTELWORD(itfrom + 2);
 			CopyMemory(mem + 0xf538e, itfrom + pos, 0x27);
 		}
