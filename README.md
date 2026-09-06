@@ -112,19 +112,10 @@ esptool --chip esp32p4 -p <PORT> -b 921600 write-flash \
 **Write the bootloader too, in `qio` mode.** From a `dio`-mode bootloader the
 emulator is measurably slower.
 
-#### Settings, and which way of flashing keeps them
+#### Settings survive a reflash
 
 Disk selection, CPU clock, backlight, volume and Bluetooth pairings live in NVS,
-at 0x9000.
-
-**The four parts keep them.** None of them lands there.
-
-**The merged image does not.** It is one contiguous run from 0x0, so the gap
-between the partition table and the OTA data is written too - and NVS is inside
-that gap. Writing `np2_TAB5_0x0.bin` clears the settings every time, which
-includes installing through M5Burner.
-
-To start from nothing:
+which flashing does not touch. To start from nothing:
 
 ```sh
 esptool --chip esp32p4 -p <PORT> erase-flash    # then write as above
