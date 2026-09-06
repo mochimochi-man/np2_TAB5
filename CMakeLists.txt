@@ -8,6 +8,15 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 #    warnings so they can't fire even if a component appends its own bare `-Werror`
 #    after this (a disabled warning is not re-enabled by `-Werror`). esp-modbus does this.
 idf_build_set_property(COMPILE_OPTIONS "-Wno-error;-Wno-stringop-truncation;-Wno-stringop-overflow" APPEND)
+
+# The version the firmware reports about itself, in the application descriptor
+# that `esptool image-info` and every OTA tool read. Set explicitly, because
+# ESP-IDF otherwise takes the FIRST LINE of version.txt - which is the title of
+# the release notes, not a version - and the image ended up calling itself
+# "np2 TAB5", or, when built from the working tree, "build 20260808 first
+# release.". Neither told anyone which firmware they were holding.
+set(PROJECT_VER "1.1.0")
+
 project(np2_espresso)
 
 # The raw tinyusb component finds tusb_config.h through its include path, and

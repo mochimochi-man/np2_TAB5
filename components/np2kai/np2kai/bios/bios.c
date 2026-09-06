@@ -83,11 +83,16 @@ static void trace_fmt_ex(const char *fmt, ...)
 
 #define	BIOS_SIMULATE
 
-/* NEC's own MS-DOS identifies the machine from a signature in the BIOS window
-   and will not run without it - that is how it keeps itself off EPSON
-   machines. The compatible BIOS built into this firmware does not carry one,
-   so a BIOS.ROM dumped from an NEC machine is needed to run that DOS. EPSON
-   DOS, and everything that does not check, are unaffected. */
+/* NEC's own MS-DOS looks for NEC's copyright notice in the BIOS window and
+   refuses to run without it - that is how it keeps itself off EPSON machines.
+   np2kai used to plant that notice here, and this build no longer does:
+   carrying NEC's copyright in a binary that contains no NEC code is a claim
+   this project has no business making, whatever it buys.
+
+   The consequence is deliberate. NEC MS-DOS will not boot on the compatible
+   BIOS built into this firmware. Anyone who wants it can select a BIOS.ROM
+   dumped from their own NEC machine, which carries the notice because NEC put
+   it there. EPSON DOS, and everything that does not check, are unaffected. */
 
 typedef struct {
 	UINT8	port;
@@ -481,10 +486,13 @@ void bios_initialize(void) {
 
 		/* A file that opens but is not 0x18000 bytes used to end up here with
 		   biosrom still FALSE, and fall out of the bottom of the test below into
-		   np2's own emulated BIOS - which is neither what the menu offered nor
-		   something it can ask for. The fallback above only fires when the file
-		   will not open, so a wrong size had nothing to catch it, and the BIOS
-		   built into this firmware was quietly not the one running.
+		   np2's own emulated BIOS - a third state the menu does not offer and
+		   cannot be asked for. The fallback above only fires when the file will
+		   not open, so a wrong size had nothing to catch it.
+
+		   It is a real trap rather than a theoretical one: the 32KB original of
+		   the compatible BIOS is exactly such a file, and selecting it silently
+		   ran something else entirely.
 
 		   So the size failure falls back the same way an open failure does. */
 		if ((!biosrom) && (path[0] != ':')) {

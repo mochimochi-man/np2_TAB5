@@ -26,6 +26,7 @@ extern "C" void (*g_kbd_log)(const char *fmt, ...) = nullptr;
     } while (0)
 #include "usb/hid_host.h"
 #include "usb/usb_host.h"
+#include "soc/usb_dwc_struct.h"
 #include "hid_input.h"
 #include "esp_timer.h"
 
@@ -232,6 +233,31 @@ static void hid_task(void *arg) {
 static void usb_lib_task(void *arg) {
     const usb_host_config_t hc = { .skip_phy_setup = false, .intr_flags = ESP_INTR_FLAG_LEVEL1 };
     if (usb_host_install(&hc) != ESP_OK) { KLOG("usb_kbd: usb_host_install FAIL\n"); vTaskDelete(NULL); return; }
+
+    // Run the port at full speed, on purpose.
+    //
+    // There is one USB-A socket, so anything that wants a keyboard AND a
+    // GreaseWeazle at the same time needs a hub - and a hub is where this
+    // falls apart. The socket is wired to the high-speed UTMI PHY, so a USB 2.0
+    // hub enumerates at high speed, and a high-speed hub reaches the full- and
+    // low-speed devices below it through a transaction translator. ESP-IDF's
+    // host stack has no TT support (hub.c has the refusal and a TODO), so every
+    // such device is rejected outright:
+    //
+    //     E HUB: Connected device is LS, transaction translator (TT) is not
+    //            supported
+    //     W HUB: Device tree node (port 4): not found
+    //
+    // Setting FSLSSupp makes the core full-/low-speed only, so the hub itself
+    // comes up as a full-speed device and there is no TT in the path at all.
+    // The bit costs nothing here: everything this port is for - keyboards,
+    // mice, a GreaseWeazle - is full or low speed already, and USB Mode is a
+    // device-side stack on the OTHER PHY and is not affected.
+    //
+    // ESP-IDF has the accessor for this and never calls it
+    // (usb_dwc_ll_hcfg_set_fsls_supp_only), so the register is written here.
+    USB_DWC_HS.hcfg_reg.fslssupp = 1;
+    KLOG("usb_kbd: host limited to full speed (hubs reach FS/LS devices)\n");
     xTaskNotifyGive((TaskHandle_t)arg);
     for (;;) {
         uint32_t flags;

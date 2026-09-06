@@ -138,7 +138,14 @@ extern "C" void usb_msc_request(int mode);  // usb_msc.cpp: arm the USB Mode boo
 extern "C" bool gw_probe(void);             // gw_mode.cpp: Greaseweazle on the USB-A port
 extern "C" bool screenshot_save(char *name, size_t cap);  // screenshot.cpp
 extern "C" void sd_unmount(void);           // sd_tab5.cpp: leave the card idle
-extern "C" bool gw_dump_disk(void (*progress)(const char *));
+extern "C" bool fdd_gw_live_mount(int drv); // fdd_gw_live.cpp: the disk in the real drive
+extern "C" bool fdd_gw_live_mounted(int drv);
+extern "C" bool fdd_gw_live_info(int drv, int *cyls, int *spt, int *secsize);
+extern "C" const char *gw_live_serial(int unit);  // gw_mode.cpp: which device it is
+extern "C" int gw_live_port(int unit);            // ...and which hub socket it is in
+// The full-screen modes indent their text to where the menu rows start.
+#define MODE_INDENT "  "
+
 #define USB_MODE_SD    1
 #define USB_MODE_IMAGE 2
 
@@ -148,6 +155,19 @@ static const char *drv_label(int d) {
 
 static const char *drv_current(int d) {
     if (d == 2) return np2cfg.sasihdd[0][0] ? (const char *)np2cfg.sasihdd[0] : "(empty)";
+    // A live drive has no file behind it, so np2cfg.fddfile[] is empty and the
+    // row would say "(empty)" however well the mount had gone. Ask the backend
+    // instead.
+    if (fdd_gw_live_mounted(d)) {
+        static char live[2][64];
+        const char *sn = (d >= 0 && d < 2) ? gw_live_serial(d) : "";
+        if (d < 0 || d > 1) {
+            return "(GreaseWeazle - the disk in the drive)";
+        }
+        snprintf(live[d], sizeof(live[0]), "(GreaseWeazle on hub port %d - %s)",
+                 gw_live_port(d), sn[0] ? sn : "no serial");
+        return live[d];
+    }
     return np2cfg.fddfile[d][0] ? (const char *)np2cfg.fddfile[d] : "(empty)";
 }
 
@@ -223,14 +243,11 @@ static void draw_drives(int sel) {
         snprintf(line, sizeof(line), "%s Disk Image Reader Mode", sel == 11 ? ">" : " ");
         lcd_menu_line(13, line, sel == 11 ? COL_BLACK : COL_WHITE,
                       sel == 11 ? COL_YELLOW : COL_BLACK);
-        snprintf(line, sizeof(line), "%s GreaseWeazle Mode (read a floppy)", sel == 12 ? ">" : " ");
-        lcd_menu_line(14, line, sel == 12 ? COL_BLACK : COL_WHITE,
-                      sel == 12 ? COL_YELLOW : COL_BLACK);
         // Last, where an action that throws the machine away belongs - not in
         // the middle of the settings, a keypress away from the volume.
-        snprintf(line, sizeof(line), "%s RESET (save & reboot)", sel == 13 ? ">" : " ");
-        lcd_menu_line(15, line, sel == 13 ? COL_BLACK : COL_WHITE,
-                      sel == 13 ? COL_YELLOW : COL_BLACK);
+        snprintf(line, sizeof(line), "%s RESET (save & reboot)", sel == 12 ? ">" : " ");
+        lcd_menu_line(14, line, sel == 12 ? COL_BLACK : COL_WHITE,
+                      sel == 12 ? COL_YELLOW : COL_BLACK);
     }
 }
 
@@ -271,9 +288,10 @@ static int scan_images(int drive) {
 }
 
 // ROM chooser. The SD root is listed for BIOS*.ROM / FONT*.ROM (case-insensitive),
-// which is how a compatible ROM built for this port and a ROM dumped from real
-// hardware end up side by side: BIOS.ROM and BIOS_ESP.ROM both match, and the
-// choice is a filename rather than a flag, so any number of them can coexist.
+// so several dumps can sit on the card at once - BIOS.ROM and BIOS_9821.ROM
+// both match - and the choice is a filename rather than a flag. The compatible
+// BIOS is not among them: it is built into the firmware and is what runs when
+// nothing here is chosen.
 static int scan_roms(const char *prefix) {
     s_count = 0;
     DIR *dir = opendir("/sd");
@@ -342,23 +360,37 @@ static void browse_rom(int which) {
     }
 }
 
+// Only a floppy drive can hold a physical disk, and only when a Greaseweazle
+// is actually plugged in - offering the row otherwise would be a dead end.
+static int live_rows(int drive) {
+    return (drive < 2) ? 1 : 0;
+}
+
 static void draw_files(int drive, int sel, int top) {
     // The row at index s_count is the drive's eject entry. FDD ejects live; HDD
     // (the running system disk) ejects by persisting the empty state and
     // rebooting, so the machine comes back up in N88-BASIC / a floppy instead of
     // having the booted disk yanked out from under the OS.
     const char *ejlabel = (drive == 2) ? "(eject HDD & reboot)" : "(eject / empty)";
+    // Floppy drives get one more row than there are files: the disk physically
+    // in the drive attached to the Greaseweazle. It belongs in this list rather
+    // than on a menu row of its own, because from the machine's point of view
+    // it is simply another thing FDD1 can have in it.
+    const int extra = live_rows(drive);
     for (int r = 0; r < VISIBLE; r++) {
         int idx = top + r;
-        if (idx > s_count) break;
+        if (idx > s_count + extra) break;
         char line[80];
-        const char *nm = (idx == s_count) ? ejlabel : s_names[idx];
+        const char *nm = (idx == s_count) ? ejlabel
+                       : (idx == s_count + 1) ? "(GreaseWeazle - the disk in the drive)"
+                       : s_names[idx];
         snprintf(line, sizeof(line), "%s %.48s", idx == sel ? ">" : " ", nm);
         lcd_menu_line(2 + r, line, idx == sel ? COL_BLACK : COL_WHITE,
                       idx == sel ? COL_YELLOW : COL_BLACK);
     }
-    // s_count entries plus the eject row; blank whatever is left below them.
-    const int used = (s_count + 1) - top;
+    // s_count entries, the eject row, and on a floppy drive the live row;
+    // blank whatever is left below them.
+    const int used = (s_count + 1 + extra) - top;
     if (used < VISIBLE) {
         lcd_menu_blank_rows(2 + (used < 0 ? 0 : used), 2 + VISIBLE - 1);
     }
@@ -379,7 +411,8 @@ static void apply_image(int drive, const char *path) {
 // File browser for one drive; returns when an image was applied or ESC.
 static void browse(int drive) {
     scan_images(drive);
-    int total = s_count + 1;                       // +1: eject entry (FDD live, HDD eject+reboot)
+    const int extra = live_rows(drive);
+    int total = s_count + 1 + extra;               // +1 eject, +1 the physical drive
     lcd_menu_clear();                             // leave the drive list cleanly (no overlap)
     if (total == 0) {
         lcd_menu_line(2, "  no images on SD", COL_WHITE, COL_BLACK);
@@ -398,6 +431,38 @@ static void browse(int drive) {
         if (sel < top) top = sel;
         if (sel >= top + VISIBLE) top = sel - VISIBLE + 1;
         if (nk == NK_RET) {
+            if (sel == s_count + 1 && extra) {    // the disk in the real drive
+                lcd_menu_clear();
+                lcd_menu_line(0, "  GreaseWeazle", COL_YELLOW, COL_BLACK);
+                lcd_menu_line(2, "  Reading the disk in the drive. It stays in the",
+                              COL_WHITE, COL_BLACK);
+                lcd_menu_line(3, "  drive while the machine runs - nothing is written",
+                              COL_WHITE, COL_BLACK);
+                lcd_menu_line(4, "  to the card, and nothing is written back to it.",
+                              COL_WHITE, COL_BLACK);
+                lcd_menu_flush();
+                const bool ok = fdd_gw_live_mount(drive);
+                char msg[80];
+                int cyls = 0, spt = 0, ss = 0;
+                if (ok && fdd_gw_live_info(drive, &cyls, &spt, &ss)) {
+                    snprintf(msg, sizeof(msg),
+                             "  Ready: %d cyl x 2 head x %d sect x %d bytes",
+                             cyls, spt, ss);
+                } else {
+                    snprintf(msg, sizeof(msg), "  Failed - see the serial log.");
+                }
+                lcd_menu_line(6, msg, COL_WHITE, COL_BLACK);
+                if (ok) {
+                    char who[80];
+                    const char *sn = gw_live_serial(drive);
+                    snprintf(who, sizeof(who), "  GreaseWeazle on hub port %d, serial %s",
+                             gw_live_port(drive), sn[0] ? sn : "(none)");
+                    lcd_menu_line(7, who, COL_YELLOW, COL_BLACK);
+                }
+                lcd_menu_flush();
+                vTaskDelay(pdMS_TO_TICKS(ok ? 3000 : 2500));
+                return;
+            }
             if (sel == s_count) {                 // eject entry
                 if (drive == 2) {
                     // Eject the running HDD: persist the now-empty HDD and reboot,
@@ -406,10 +471,19 @@ static void browse(int drive) {
                     np2cfg.sasihdd[0][0] = '\0';
                     lcd_menu_clear();
                     lcd_menu_line(2, "  HDD ejected - rebooting...", COL_WHITE, COL_BLACK);
+                    // Same reason as the reboot out of USB Mode: the framebuffer
+                    // lives in PSRAM, so without pushing the cache out the clear
+                    // and the text never reach it, and the panel keeps whatever
+                    // the cache happened to evict - half the old menu, left as
+                    // character debris.
+                    lcd_menu_flush();
                     save_settings();
                     vTaskDelay(pdMS_TO_TICKS(800));
+                    // And hand the card back, so the boot that follows can
+                    // initialise it from scratch rather than find it busy.
+                    sd_unmount();
                     panel_tab5_blank_early();
-                esp_restart();
+                    esp_restart();
                 }
                 apply_image(drive, NULL);         // FDD: live eject
             } else {
@@ -542,84 +616,6 @@ static void save_settings(void) {
     }
 }
 
-// GreaseWeazle Mode: read the floppy in the drive attached to the Greaseweazle
-// on the USB-A port and write it to the SD card as an NFD.
-//
-// This runs here rather than in a reboot-into-mode like the USB readers,
-// because it needs the SD card mounted and the panel alive, and the menu is
-// already the one place where both are true and the emulator is not running.
-// GreaseWeazle Mode: read the floppy in the drive attached to the Greaseweazle
-// on the USB-A port and write it to the SD card as an NFD.
-//
-// This runs here rather than in a reboot-into-mode like the USB readers,
-// because it needs the SD card mounted and the panel alive, and the menu is
-// already the one place where both are true and the emulator is not running.
-// The screen follows the same shape as those two all the same - title in
-// yellow on row 0 worded as the menu row, body from row 2, how-to-leave lower
-// down - so the three modes look like one family.
-#define MODE_INDENT "  "
-
-static void gw_progress_line(const char *text) {
-    char line[96];
-    snprintf(line, sizeof(line), MODE_INDENT "%.60s", text);
-    lcd_menu_line(5, line, COL_WHITE, COL_BLACK);
-    lcd_menu_flush();
-}
-
-static void gw_mode_flow(void) {
-    lcd_menu_clear();
-    lcd_menu_line(0, MODE_INDENT "GreaseWeazle Mode", COL_YELLOW, COL_BLACK);
-    lcd_menu_line(2, MODE_INDENT "Reads the floppy in the drive and writes it to",
-                  COL_WHITE, COL_BLACK);
-    lcd_menu_line(3, MODE_INDENT "the SD card as a .NFD. Takes a couple of minutes.",
-                  COL_WHITE, COL_BLACK);
-    lcd_menu_flush();
-
-    // Ask first. Every other row in this menu either changes a setting that can
-    // be changed straight back, or opens a list that ESC leaves - whereas this
-    // one starts a two-minute read the moment it is chosen, which is not what
-    // pressing RET on a menu row should be able to do by accident. Probing the
-    // device costs nothing and turns the confirmation into something useful:
-    // it says whether there is anything to start before the choice is made.
-    const bool found = gw_probe();
-    lcd_menu_line(5, found ? MODE_INDENT "Greaseweazle found on the USB-A port."
-                           : MODE_INDENT "No Greaseweazle found on the USB-A port.",
-                  COL_WHITE, COL_BLACK);
-    lcd_menu_line(9, found ? MODE_INDENT "RET starts the read.  ESC returns to the menu."
-                           : MODE_INDENT "ESC returns to the menu.",
-                  COL_YELLOW, COL_BLACK);
-    lcd_menu_flush();
-
-    for (;;) {
-        uint8_t nk, dn;
-        if (!menu_key_pop(&nk, &dn) || !dn) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
-        if (nk == NK_ESC) {
-            return;
-        }
-        if (nk == NK_RET && found) {
-            break;
-        }
-    }
-
-    lcd_menu_blank_rows(5, 10);
-    lcd_menu_line(5, MODE_INDENT "Starting the drive...", COL_WHITE, COL_BLACK);
-    lcd_menu_flush();
-    gw_dump_disk(gw_progress_line);
-
-    lcd_menu_line(9, MODE_INDENT "Press any key to return.", COL_YELLOW, COL_BLACK);
-    lcd_menu_flush();
-    for (;;) {
-        uint8_t nk, dn;
-        if (menu_key_pop(&nk, &dn) && dn) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-}
-
 extern "C" void menu_disk_run(void) {
     int sel = 0;
     lcd_menu_clear();
@@ -630,7 +626,7 @@ extern "C" void menu_disk_run(void) {
         if (!dn) continue;
         if (nk == NK_ESC) break;
         if (key_is_up(nk)   && sel > 0) sel--;
-        if (key_is_down(nk) && sel < 13) sel++;
+        if (key_is_down(nk) && sel < 12) sel++;
         // Left/right adjust the rows that hold a value rather than doing
         // something; everywhere else they are ignored.
         {
@@ -694,10 +690,7 @@ extern "C" void menu_disk_run(void) {
                 sd_unmount();
                 panel_tab5_blank_early();
                 esp_restart();
-            } else if (sel == 12) {             // GreaseWeazle Mode
-                gw_mode_flow();
-                lcd_menu_clear();   // the submenu owned the screen
-            } else if (sel == 13) {             // RESET: persist the settings, reboot
+            } else if (sel == 12) {             // RESET: persist the settings, reboot
                 save_settings();
                 sd_unmount();                   // same reason as USB Mode above
                 panel_tab5_blank_early();

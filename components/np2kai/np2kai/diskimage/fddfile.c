@@ -29,6 +29,7 @@ void fddfunc_init(FDDFUNC fdd_fn) {
 	fdd_fn->diskaccess	= fdd_dummy_xxx;
 	fdd_fn->seek		= fdd_dummy_xxx;
 	fdd_fn->seeksector	= fdd_dummy_xxx;
+	fdd_fn->readdiag	= fdd_dummy_xxx;
 	fdd_fn->read		= fdd_dummy_xxx;
 	fdd_fn->write		= fdd_dummy_xxx;
 	fdd_fn->readid		= fdd_dummy_xxx;
@@ -446,6 +447,20 @@ BRESULT fdd_read(void) {
 	}
 	return(FAILURE);
 #endif
+}
+
+BRESULT fdd_diagread(void) {
+
+	FDDFILE		fdd;
+	FDDFUNC		fdd_fn;
+
+	sysmng_fddaccess(fdc.us);
+	fdd = fddfile + fdc.us;
+	fdd_fn = fddfunc + fdc.us;
+	/* Backends without a READ DIAGNOSTIC implementation fall back to the
+	 * historical sector-at-a-time path in their caller. */
+	fddlasterror = 0xc0;
+	return(fdd_fn->readdiag(fdd));
 }
 
 BRESULT fdd_write(void) {

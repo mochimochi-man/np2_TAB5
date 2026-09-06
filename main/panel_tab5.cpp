@@ -16,14 +16,15 @@
 // (all 2 data lanes)
 //
 // Almost nothing is shared: the lane rate, the vertical timings and the entire
-// command set all differ. So both panels are supported here, but by different
-// means. The ST7121 is driven by the hand-rolled sequence below, which is what
-// was established on this board. The ST7123 is driven through Espressif's
-// esp_lcd_st7123 component with the BSP's own register data, timings and lane
-// rate - see bringup_st7123(), and bringup_ili9881c() for the earliest boards.
-// Nothing with either of those panels has ever run this firmware, and
-// following the path their vendors validate is a better bet than extending a
-// sequence that was tuned against different silicon.
+// command set all differ. But the DELIVERY is now the same for both of the
+// ST712x panels: each vendor's register data, sent by the hand-rolled sequence
+// below rather than through the vendor's own driver. That is not a preference.
+// Both panels were black through their vendor drivers and both came up through
+// this sequence, on real hardware, at the BSP's own lane rate - the ST7121
+// here, the ST7123 on a user's unit through a ten-configuration sweep. See
+// bringup_st7123() for what that sweep said. The earliest boards' ILI9881C is
+// still driven by its vendor driver, and is still the one panel nothing has
+// ever been confirmed on.
 //
 // The command bytes below are identical to Espressif's esp_lcd_st7121
 // component, but the surrounding sequence is not, and the difference matters
@@ -440,25 +441,43 @@ extern "C" void panel_tab5_blank_early(void) {
 
 // ---- ST7123 ----------------------------------------------------------------
 // The panel on later Tab5 units. Told apart from the ST7121 by the touch
-// controller's firmware version, which is the only thing that distinguishes
-// them - both answer at the same I2C address, which is why the BSP, that picks
-// its panel by board revision alone, gets it wrong on an ST7121 board.
+// controller's firmware version - 3 rather than 1 - which is the only thing
+// that distinguishes them, since both answer at the same I2C address.
 //
-// UNTESTED. No unit with this panel has been available, so this path is
-// deliberately not the hand-rolled sequence used for the ST7121: it goes
-// through esp_lcd_new_panel_st7123() with the lane rate, pixel clock, video
-// timings and register data the Tab5 BSP uses, because those are what M5 and
-// Espressif validate against real ST7123 hardware.
+// What follows is deliberately NOT the vendor driver, and the history matters.
+// Until 1.0.2 this path went through esp_lcd_new_panel_st7123() with the BSP's
+// lane rate, timings and register data, on the reasoning that following the
+// path a vendor validates beats extending a sequence that was tuned against
+// different silicon. On the first ST7123 unit this firmware ever ran on, that
+// produced precisely the failure it was meant to avoid: every call returning
+// ESP_OK, the backlight on, and the panel black.
 //
-// The one thing carried across from the ST7121 work is the frame-acknowledge
-// override. That is a property of the DSI host, not of the panel: esp_lcd sets
-// frame_bta_ack_en unconditionally in esp_lcd_new_panel_dpi(), the panel is
-// then asked to turn the bus around once per frame, and the resulting
-// low-power contention on a data lane is what made the picture flash. The
-// st7123 driver calls esp_lcd_new_panel_dpi() from inside
-// esp_lcd_new_panel_st7123(), so the override goes in the same place it does
-// on the other path: after the panel exists, before esp_lcd_panel_init()
-// starts the video.
+// A ten-configuration sweep on that unit settled it (np2_TAB5_PanelDiag, one
+// configuration per boot, the tester tapping whenever a picture appeared). The
+// register data was never the problem; the way it was being delivered was:
+//
+//   BSP 1.3.0's own bsp_display_new()            black
+//   vendor driver, 1000 Mbps  (what 1.0.1 did)   black
+//   vendor driver,  965 Mbps                     black
+//   vendor driver,  900 Mbps                     PICTURE
+//   vendor driver, 1300 Mbps                     PICTURE
+//   THIS SEQUENCE, 1000 Mbps                     PICTURE
+//   the ST7121 sequence and its data             black
+//
+// The lane rate is not a smooth axis on this panel - 900 and 1300 work while
+// 965 and 1000 between them do not - so a fix that moves the rate is a fix
+// resting on one unit's analogue margins. This keeps the BSP's rate and changes
+// the delivery instead, which is also the smaller change: it is the sequence
+// the ST7121 has always used here, with the ST7123's register data in it.
+//
+// The difference from the vendor driver that most likely matters is its last
+// line. esp_lcd hands the clock lane to the host's automatic control, which
+// lets the HS clock fall to LP during blanking, and this panel's vertical front
+// porch is 220 lines - a long gap, every frame, for a PLL to come back from.
+// Forcing the clock lane to stay in HS is what the ST7121 needed too. The
+// sweep could not separate that from the rest of the sequence (one step, one
+// tester, one run), so the whole sequence is adopted rather than the one line
+// guessed at.
 static bool bringup_st7123(esp_lcd_dsi_bus_handle_t *out_bus,
                            esp_lcd_panel_io_handle_t *out_io,
                            esp_lcd_panel_handle_t *out_panel,
@@ -489,6 +508,7 @@ static bool bringup_st7123(esp_lcd_dsi_bus_handle_t *out_bus,
         return false;
     }
 
+    // The BSP's timings for this panel, unchanged. Only the delivery differs.
     esp_lcd_dpi_panel_config_t dpi = {};
     dpi.virtual_channel = 0;
     dpi.dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT;
@@ -504,27 +524,13 @@ static bool bringup_st7123(esp_lcd_dsi_bus_handle_t *out_bus,
     dpi.video_timing.vsync_pulse_width = 2;
     dpi.video_timing.vsync_front_porch = 220;
     dpi.flags.use_dma2d = true;
-
-    st7123_vendor_config_t vendor = {};
-    vendor.init_cmds = disp_init_data_st7123;
-    vendor.init_cmds_size = (uint16_t)(sizeof(disp_init_data_st7123) /
-                                       sizeof(disp_init_data_st7123[0]));
-    vendor.mipi_config.dsi_bus = *out_bus;
-    vendor.mipi_config.dpi_config = &dpi;
-
-    esp_lcd_panel_dev_config_t pcfg = {};
-    pcfg.reset_gpio_num = -1;          // BSP_LCD_RST is GPIO_NUM_NC on the Tab5
-    pcfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
-    pcfg.bits_per_pixel = 16;
-    pcfg.vendor_config = &vendor;
-
-    if (esp_lcd_new_panel_st7123(*out_io, &pcfg, out_panel) != ESP_OK) {
-        ets_printf("panel: esp_lcd_new_panel_st7123 failed\n");
+    if (esp_lcd_new_panel_dpi(*out_bus, &dpi, out_panel) != ESP_OK) {
+        ets_printf("panel: dpi panel failed\n");
         return false;
     }
 
-    // Blank the frame buffer before the video starts: the DSI bridge paints
-    // blue while its FIFO is empty, which is exactly the first few frames.
+    // Blank before the video starts: the DSI bridge paints blue while its FIFO
+    // is empty, which is exactly the first frames after the video comes on.
     {
         uint16_t *fb0 = nullptr;
         if (esp_lcd_dpi_panel_get_frame_buffer(*out_panel, 1, (void **)&fb0) == ESP_OK && fb0) {
@@ -533,31 +539,72 @@ static bool bringup_st7123(esp_lcd_dsi_bus_handle_t *out_bus,
                             ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
         }
     }
+    // esp_lcd_new_panel_dpi() has just written VID_MODE_CFG: the burst type, and
+    // frame_bta_ack_en unconditionally on. A bus turnaround per frame is a
+    // per-frame disturbance on the low-power lines; it is off on both panels.
     mipi_dsi_host_ll_dpi_set_video_burst_type(&MIPI_DSI_HOST,
                                               MIPI_DSI_LL_VIDEO_BURST_WITH_SYNC_PULSES);
     mipi_dsi_host_ll_dpi_enable_frame_ack(&MIPI_DSI_HOST, false);
 
-    // The vendor driver sends the register data and the sleep-out/display-on
-    // from inside panel_init(); reset() first is what the BSP does.
-    esp_lcd_panel_reset(*out_panel);
-    if (esp_lcd_panel_init(*out_panel) != ESP_OK) {
-        ets_printf("panel: st7123 init failed\n");
-        return false;
+    // The BSP's register data, sent straight through with no software reset
+    // ahead of it and no five milliseconds between commands - the two things
+    // the vendor driver adds. The tail of the list (MADCTL, sleep out, display
+    // on, tearing line) is skipped and sent below with waits that the list does
+    // not carry.
+    {
+        const int n = (int)(sizeof(disp_init_data_st7123) /
+                            sizeof(disp_init_data_st7123[0]));
+        for (int i = 0; i < n; i++) {
+            const st7123_lcd_init_cmd_t *c = &disp_init_data_st7123[i];
+            if (c->cmd == 0x36 || c->cmd == 0x11 || c->cmd == 0x29 || c->cmd == 0x35) {
+                continue;
+            }
+            if (esp_lcd_panel_io_tx_param(*out_io, c->cmd, c->data, c->data_bytes) != ESP_OK) {
+                ets_printf("panel: cmd %02x failed\n", c->cmd);
+                return false;
+            }
+        }
     }
 
+    const uint8_t slpout = 0x11, dispon = 0x29;
+    esp_lcd_panel_io_tx_param(*out_io, slpout, nullptr, 0);
+    vTaskDelay(pdMS_TO_TICKS(80));
+    esp_lcd_panel_io_tx_param(*out_io, dispon, nullptr, 0);
+    vTaskDelay(pdMS_TO_TICKS(800));
+    const uint8_t te_on = 0x00;
+    esp_lcd_panel_io_tx_param(*out_io, 0x35, &te_on, 1);
+
+    const uint8_t madctl = 0x00;
+    const uint8_t colmod = 0x55;  // RGB565, which the vendor list never sets
+    esp_lcd_panel_io_tx_param(*out_io, 0x36, &madctl, 1);
+    esp_lcd_panel_io_tx_param(*out_io, 0x3A, &colmod, 1);
+
+    // BEFORE esp_lcd_panel_init(), and that is not incidental. A DSI read puts
+    // the host into command mode (mipi_dsi_host_ll_enable_video_mode(false),
+    // inside the HAL) and nothing puts it back except dpi_panel_init(). Read
+    // after the video has started and the host stays in command mode.
     uint8_t pwr = 0;
     if (esp_lcd_panel_io_rx_param(*out_io, 0x0A, &pwr, 1) == ESP_OK) {
-        // Bit 2 set means the display is on; a healthy panel reads back 0x9c.
-        // Worth printing whatever it says: on hardware nobody here has, this
-        // one byte is the difference between "the link works and something
-        // else is wrong" and "the panel never came up".
+        // D2 set = display on. 0x9c is what a healthy panel reports here.
         ets_printf("panel: ST7123 power mode = 0x%02x%s\n", pwr,
                    (pwr & 0x04) ? "" : "  (display reports OFF)");
     } else {
         ets_printf("panel: ST7123 did not answer the power-mode read\n");
     }
 
-    if (esp_lcd_dpi_panel_get_frame_buffer(*out_panel, 1, (void **)out_fb) != ESP_OK) {
+    if (esp_lcd_panel_init(*out_panel) != ESP_OK) {
+        ets_printf("panel: dpi init failed\n");
+        return false;
+    }
+
+    // esp_lcd_panel_dpi.c hands the clock lane to the host's automatic control
+    // when it starts the video, which lets the HS clock drop to LP during
+    // blanking. With a 220-line vertical front porch that is a long gap every
+    // frame. This is the line the ST7121 needed, and the most likely reason
+    // this sequence comes up where the vendor driver does not.
+    mipi_dsi_host_ll_set_clock_lane_state(&MIPI_DSI_HOST, MIPI_DSI_LL_CLOCK_LANE_STATE_HS);
+
+    if (esp_lcd_dpi_panel_get_frame_buffer(*out_panel, 1, (void **)out_fb) != ESP_OK || !*out_fb) {
         ets_printf("panel: no frame buffer\n");
         return false;
     }

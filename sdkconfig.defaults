@@ -55,6 +55,20 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # Here both can be live at the same time.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# ---- USB host ---------------------------------------------------------------
+# External hubs. Off by default in ESP-IDF, and with it off the USB-A port only
+# ever sees a device plugged straight into it: a keyboard or a GreaseWeazle
+# behind a hub is enumerated by nobody and simply does not exist. There is one
+# socket on this board, so a hub is how anyone uses two things at once.
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
+CONFIG_USB_HOST_HUB_MULTI_LEVEL=y
+# A low-speed keyboard behind the hub failed its first descriptor read and the
+# port was given up on after a single try ("reset attempts=1"). Low-speed
+# devices are the slowest to settle after a port reset, so give them longer and
+# more than one attempt.
+CONFIG_USB_HOST_EXT_PORT_RESET_ATTEMPTS=3
+CONFIG_USB_HOST_EXT_PORT_RESET_RECOVERY_DELAY_MS=100
+
 # ---- FreeRTOS --------------------------------------------------------------
 CONFIG_FREERTOS_HZ=1000
 

@@ -75,9 +75,12 @@ header.
 ## 3. What this project deliberately does **not** contain
 
 - **No NEC PC-9801 BIOS, ITF or CGROM data**, in any form.
-  - The BIOS built into the image (`main/rom/BIOS_Compatible_O.ROM`) is an
-    independent implementation, built from `rom_src/bios_compat_o.asm` in this
-    archive. It contains no NEC code.
+  - The BIOS built into the image (`main/rom/PC98N.ROM`) is an independent
+    implementation, built from `rom_src/pc98_bios_native/pc98n.asm` in this
+    archive, which reproduces it byte for byte. It contains no NEC code, and
+    none from any other vendor's BIOS either: compared against a genuine EPSON
+    BIOS.ROM, no run of 16 bytes or longer is common to the two images and it
+    carries no vendor copyright notice but its own.
   - The font built into the image (`main/rom/FONT_ESP.ROM`) is generated from
     the public-domain Shinonome bitmap fonts by `rom_src/mkfont_esp.py`
     (§4.6). It is not a dump of any real machine's character generator.

@@ -313,8 +313,15 @@ void dosio_term(void) {}
 #define BUILTIN_BIOS ":builtin/BIOS.ROM"
 #define BUILTIN_FONT ":builtin/FONT.ROM"
 
-extern const uint8_t builtin_bios_start[] asm("_binary_BIOS_Compatible_O_ROM_start");
-extern const uint8_t builtin_bios_end[]   asm("_binary_BIOS_Compatible_O_ROM_end");
+// BIOS98C (rom_src/bios_esp.asm). Built around np2kai's hook mechanism: it
+// points the interrupt vectors at the addresses bios.c dispatches on, plants
+// the hook instruction at each, and calls bootstrapload() itself rather than
+// assuming a boot sector is already sitting at 0000:7C00. If no device boots
+// it halts where you can see it. Nothing in it derives from NEC's ROM, and it
+// carries no NEC copyright notice - so NEC's own MS-DOS, which checks for one,
+// needs a BIOS.ROM dumped from an NEC machine instead.
+extern const uint8_t builtin_bios_start[] asm("_binary_PC98N_ROM_start");
+extern const uint8_t builtin_bios_end[]   asm("_binary_PC98N_ROM_end");
 extern const uint8_t builtin_font_start[] asm("_binary_FONT_ESP_ROM_start");
 extern const uint8_t builtin_font_end[]   asm("_binary_FONT_ESP_ROM_end");
 

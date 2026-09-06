@@ -52,9 +52,10 @@ np2_TAB5 は PC-9801 エミュレータ **NP2kai** を **M5Stack Tab5**（ESP32-
 ## 3. 意図的に含めていないもの
 
 - **NEC の PC-9801 BIOS / ITF / CGROM データは一切含みません。**
-  - イメージに内蔵した BIOS（`main/rom/BIOS_Compatible_O.ROM`）は独立実装で、
-    本アーカイブの `rom_src/bios_compat_o.asm` からビルドできます。NEC のコードは
-    含みません。
+  - イメージに内蔵した BIOS（`main/rom/PC98N.ROM`）は独立実装で、本アーカイブの
+    `rom_src/pc98_bios_native/pc98n.asm` からバイト単位で再現できます。NEC のコード
+    は含みません。他社 BIOS のコードも含みません — EPSON 実機の BIOS.ROM と照合して、
+    16 バイト以上一致する箇所は 1 か所もなく、他社の著作権表示も持っていません。
   - 内蔵フォント（`main/rom/FONT_ESP.ROM`）はパブリックドメインの東雲ビットマップ
     フォントから `rom_src/mkfont_esp.py` で生成したものです（§4.6）。実機の
     キャラクタジェネレータのダンプではありません。

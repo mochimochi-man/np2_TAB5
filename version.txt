@@ -1,28 +1,25 @@
 np2 TAB5
 
 
+1.1.0   2026-09-06
+
+  - fixed: exchanged with a new built-in compatible BIOS.
+  - fixed: the startup priority order has been modified.
+  - fixed: key repeat.
+  - Fixed: SD Card Reader Mode and Disk Image Reader Mode restarted itself instead of appearing on the PC.
+  - Added: GreaseWeazle can be mounted on a floppy disk drive as a floppy disk.
+  - Added: Support Self-powered USB hub for GreaseWeazle.
+  - Deleted: FD ripping by GreaseWeazle.
+
+1.0.2   2026-09-05
+
+  - Fixed: the display stayed black on a unit with the ST7123 panel. Thanks to its owner for testing.
+  - Fixed: a floppy disk would not boot while a hard disk was mounted.
+
+
 1.0.1   2026-09-05
 
-  - Fixed: the built-in BIOS was not running, and NP2kai's own emulated BIOS
-    was standing in for it.
+  - Fixed: the built-in BIOS was not running.
 
 
 1.0.0   2026-09-03   first release
-
-  PC-9801 emulator for the M5Stack Tab5 (ESP32-P4). Forked from np2 espresso,
-  the ESP32-S3 emulator, which is itself based on NP2kai.
-
-  - MIPI-DSI panel driven directly rather than through the BSP, which picks its
-    panel by board revision and gets this one wrong. The panel is identified at
-    boot from the touch controller: ST7121, ST7123 or ILI9881C. Only the ST7121
-    has been tested on real hardware.
-  - Rotation and scaling on the PPA, the P4's 2D pixel engine.
-  - A compatible BIOS and font are built into the firmware, so the emulator
-    starts from a blank SD card with no ROM dump present.
-  - USB keyboard and mouse on the USB-A port; Bluetooth LE keyboard and mouse
-    through the companion ESP32-C6; the touch panel acts as the PC-98 mouse.
-  - SD Card Reader Mode and Disk Image Reader Mode over USB - the latter
-    presents the DOS volume inside the mounted hard disk image to the PC.
-  - GreaseWeazle Mode: reads a real floppy through a GreaseWeazle on the USB-A
-    port and writes it to the SD card as a .NFD.
-  - Screenshots written to the SD card as PNG.

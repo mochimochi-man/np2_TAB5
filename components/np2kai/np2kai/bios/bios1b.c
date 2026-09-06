@@ -505,6 +505,50 @@ static REG8 fdd_operate(REG8 type, REG8 rpm, BOOL ndensity) {
     break;
 
   case 0x02: // 診断の為の読み込み
+    if (CPU_AH & 0x10) {
+      if (biosfd_seek(CPU_CL, ndensity) == SUCCESS) {
+        result = FDCBIOS_SEEKSUCCESS;
+      } else {
+        ret_ah = 0xe0;
+        result = FDCBIOS_SEEKERROR;
+        break;
+      }
+    }
+    biosfd_setchrn();
+    para = fdfmt_biospara(type, rpm, 0);
+    if (!para) {
+      ret_ah = 0xd0;
+      break;
+    }
+    size = CPU_BX;
+    addr = ES_BASE + CPU_BP;
+    if ((addr & 0xffff) > ((addr + size - 1) & 0xffff)) {
+      ret_ah = 0x20;
+      result = FDCBIOS_READERROR;
+      break;
+    }
+    if (fdd_diagread() == SUCCESS) {
+      accesssize = (size < (UINT)fdc.bufcnt) ? size : (UINT)fdc.bufcnt;
+      MEML_WRITES(addr, fdc.buf, accesssize);
+      size -= accesssize;
+      mtr_r += accesssize;
+      if (!size) {
+        ret_ah = fddlasterror;
+        result = FDCBIOS_SUCCESS;
+      } else {
+        ret_ah = 0xc0;
+        result = FDCBIOS_READERROR;
+      }
+      break;
+    }
+    if (fddlasterror != 0xc0) {
+      ret_ah = fddlasterror;
+      result = FDCBIOS_READERROR;
+      break;
+    }
+    /* A file backend without physical track data keeps the long-standing
+     * approximation below. */
+    /* FALLTHROUGH */
   case 0x06: // データの読み込み
     if (CPU_AH & 0x10) {
       if (biosfd_seek(CPU_CL, ndensity) == SUCCESS) {
@@ -836,7 +880,24 @@ REG16 bootstrapload(void) {
 
   // 猫エミュレーションBIOSはAH=0,AL=0でやってくる
   // そうでないなら別の場所からジャンプで来ているのでAH, ALの値に基づいてブート
-  if (CPU_AX != 0) {
+  //
+  // ...but only when AL/AH actually look like a device range. Measured on a
+  // Tab5 with a real BIOS.ROM and both a floppy and a hard disk mounted:
+  //
+  //     boot: AX=8309 MSW5=01 fdready=1000 hddif=04 dev0=1
+  //
+  // AH=0x83 is not a device number - the table below only knows 0x01-0x04
+  // (FDD), 0x0A, 0x0B and 0x0C - so this is whatever was left in AX by the
+  // jump, not a request. Walked as a range it starts at 0x09, steps straight
+  // past the FDD arm, and takes HDD#1: a machine that will not boot a floppy
+  // while a hard disk is attached, though it boots the same floppy fine with
+  // the disk removed. A real PC-98 scans the drives before the fixed disk.
+  //
+  // So the range has to be a plausible one before it is honoured. A ROM that
+  // really does ask for a specific device (0x0A-0x0C, say) still gets it; a
+  // ROM that arrives with rubbish in AX falls through to the standard scan
+  // below, which is FDD first.
+  if (CPU_AX != 0 && CPU_AL >= 0x01 && CPU_AH <= 0x0c && CPU_AL <= CPU_AH) {
     // AL -> AHで探す
     int ii;
     REG8 regAL = CPU_AL;

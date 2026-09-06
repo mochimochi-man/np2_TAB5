@@ -232,23 +232,80 @@ static void FDC_Invalid(void) {							// cmd: xx
 }
 
 #ifdef SUPPORT_KAI_IMAGES
+static BOOL fdc_diag_mode;
+static void FDC_ReadData(void);
+
+static void diagread_ready(void) {
+
+#if defined(SUPPORT_SWSEEKSND)
+	if(np2cfg.MOTOR) fddmtrsnd_play(1, TRUE);
+#else
+	if(np2cfg.MOTOR) {
+		if(fdc_seeksndtimeout[fdc.us]!=0){
+			soundmng_pcmplay(SOUND_PCMSEEK, FALSE);
+		}else{
+			soundmng_pcmstop(SOUND_PCMSEEK1);
+			soundmng_pcmplay(SOUND_PCMSEEK1, FALSE);
+		}
+	}
+#endif
+	fdc_seeksndtimeout[fdc.us] = FDC_SEEKSOUND_TIMEOUT;
+
+	fdc.event = FDCEVENT_BUFSEND2;
+	fdc.bufp = 0;
+	fdc.status &= 0x0f;
+	fdc.status |= (1 << fdc.us);
+	fdc.status |= FDCSTAT_RQM | FDCSTAT_DIO | FDCSTAT_CB;
+	if (fdc.nd) {
+		fdc.status |= FDCSTAT_NDM;
+	}
+	fdc_dmaready(1);
+	dmac_check();
+}
+
 static void FDC_ReadDiagnostic(void) {					// cmd: 02
 
 	switch(fdc.event) {
 		case FDCEVENT_CMDRECV:
+			fdc_diag_mode = FALSE;
 			get_hdus();
 			get_chrn();
 			get_eotgsldtl();
 			fdc.stat[fdc.us] = (fdc.hd << 2) | fdc.us;
-
-			if (FDC_DriveCheck(FALSE)) {
-				fdc.event = FDCEVENT_BUFSEND;
-//				fdc.bufcnt = makedianosedata();
-				fdc.bufp = 0;
+			if(fdc_lasttreg[fdc.us] != fdc.treg[fdc.us]){
+				fdc.treg[fdc.us] = fdc.C;
+			}
+			if (!FDC_DriveCheck(FALSE)) {
+				break;
+			}
+			if (fdd_diagread() == SUCCESS) {
+				fdc_diag_mode = TRUE;
+				diagread_ready();
+			}
+			else if (fddlasterror == 0xc0) {
+				/* Image backends which do not preserve track layout retain the
+				 * old, sector-at-a-time approximation. */
+				FDC_ReadData();
+			}
+			else {
+				fdc.stat[fdc.us] = fdc.us | (fdc.hd << 2) |
+										FDCRLT_IC0 | FDCRLT_ND;
+				fdcsend_error7();
 			}
 			break;
 
+		case FDCEVENT_NEXTDATA:
+			if (!fdc_diag_mode) {
+				FDC_ReadData();
+				break;
+			}
+			fdc.bufcnt = 0;
+			fdc_diag_mode = FALSE;
+			fdcsend_success7();
+			break;
+
 		default:
+			fdc_diag_mode = FALSE;
 			fdc.event = FDCEVENT_NEUTRAL;
 			break;
 	}
@@ -421,7 +478,11 @@ static void readsector(void) {
 		return;
 	}
 	if (fdd_read()) {
-		fdc.stat[fdc.us] = fdc.us | (fdc.hd << 2) | FDCRLT_IC0 | FDCRLT_ND;
+		/* A backend that has already said what went wrong keeps its answer;
+		   only fill in the default when it left the status empty. */
+		if (!(fdc.stat[fdc.us] & 0x00ffff00)) {
+			fdc.stat[fdc.us] = fdc.us | (fdc.hd << 2) | FDCRLT_IC0 | FDCRLT_ND;
+		}
 		fdcsend_error7();
 		return;
 	}
@@ -802,7 +863,11 @@ typedef void (*FDCOPE)(void);
 static const FDCOPE FDC_Ope[0x20] = {
 				FDC_Invalid,
 				FDC_Invalid,
+#ifdef SUPPORT_KAI_IMAGES
+				FDC_ReadDiagnostic,
+#else
 				FDC_ReadData,			// FDC_ReadDiagnostic,
+#endif
 				FDC_Specify,
 				FDC_SenseDeviceStatus,
 				FDC_WriteData,
@@ -852,6 +917,9 @@ static void fdcstatusreset(void) {
 
 	fdc.event = FDCEVENT_NEUTRAL;
 	fdc.status = FDCSTAT_RQM;
+#ifdef SUPPORT_KAI_IMAGES
+	fdc_diag_mode = FALSE;
+#endif
 }
 
 void DMACCALL fdc_datawrite(REG8 data) {

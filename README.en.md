@@ -21,7 +21,8 @@ hardware is needed.**
 
 ### USB keyboard and mouse
 
-Using both at once needs a self-powered hub with its own AC adapter.
+**A USB keyboard and a USB mouse cannot be used at the same time**, because
+ESP-IDF does not support it.
 
 ### Bluetooth keyboard and mouse
 
@@ -47,9 +48,9 @@ rate is about 0.6MB/s, which is very slow.
 
 ### GreaseWeazle mode
 
-Reads a real floppy through a GreaseWeazle plugged into the Tab5's USB-A port and
-writes it to the SD card as a PC-9801 2DD/2HD disk image (`.NFD`).
-**Copy-protected disks are not supported.**
+Mounts the disk sitting in a real drive, through a GreaseWeazle plugged into the
+Tab5's USB-A port. See
+[GreaseWeazle mode](#greaseweazle-mode-1) under *Running it* for the details.
 
 ---
 
@@ -154,16 +155,38 @@ is no time limit.**
   mouse.
 - Once a keyboard and a mouse are both connected, scanning stops.
 
+### GreaseWeazle mode
+
+Mounts the disk sitting in a real drive directly, through a GreaseWeazle plugged
+into the Tab5's USB-A port. To use it, mount the GreaseWeazle on FDD1 or FDD2
+from the menu.
+
+- Up to two GreaseWeazles can be connected. For that, use a **self-powered USB
+  hub**.
+- **Power the drives separately.** A 5-inch drive needs its own supply.
+- After changing a disk, eject it from the menu once and mount it again.
+- **Copy-protected disks are not supported.**
+
+Set the jumpers on a drive connected to a GreaseWeazle as below. Where there is
+more than one drive, set them all the same.
+
+```
+DX:1
+MON:1
+USE:2
+RD:1
+HDE:1
+DEN:1
+```
+
 ---
 
 ## 4. Notes
 
 - As of the latest builds, the M5Stack Tab5 ships with one of three display
-  controllers: **ST7123, ST7121 or ILI9881C**. The Tab5 this was developed on
-  uses the **ST7121**, and **the other two have not been tested.** If you see
-  nothing on the screen, or anything else goes wrong, I would be glad to hear
-  about it at **[@calorie0](https://x.com/calorie0)** on X — though I cannot
-  promise a fix.
+  controllers: **ILI9881C (ver.1), ST7123 (ver.2) or ST7121 (ver.3)**. The
+  ILI9881C (ver.1) is **not supported**, as it could not be tested on real
+  hardware.
 - Everything MIDI has been omitted from the np2kai base: it did not fit in RAM.
 
 ---

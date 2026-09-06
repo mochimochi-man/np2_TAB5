@@ -32,7 +32,8 @@ extern "C" {
 #include <io/serial.h>
 #include <io/gdc.h>
 void mouseif_changeclock(void);   // io/mouseif.h has a C/C++ typedef clash; declared here instead
-#include <cpucore.h>              // CPU_CLOCK/BASECLOCK/REMCLOCK (emulated cycle counter)
+#include <cpucore.h>
+              // CPU_CLOCK/BASECLOCK/REMCLOCK (emulated cycle counter)
 #include <font/font.h>               // fontrom (CGROM) for the boot-phase text renderer
 #include <common/milstr.h>
 BOOL fdd_diskready(REG8 drv);      // diskimage/fddfile.h
@@ -56,12 +57,19 @@ void usb_kbd_init(void);           // usb_kbd.cpp: USB HID keyboard host
 // No bt_hid here: the P4 has no radio of its own. Bluetooth would go
 // through the companion ESP32-C6 over esp-hosted — a later phase.
 int  usb_msc_boot_flag_take(void); // usb_msc.cpp: read+clear the USB Mode request (0 = none)
+void usb_msc_report_last(void);    // usb_msc.cpp: how far the last USB Mode attempt got
+void usb_msc_dump_log(void);       // usb_msc.cpp: print /sd/USBMODE.LOG
+void gw_live_keepalive(void);       // gw_mode.cpp: keep a mounted drive turning
+void fdd_gw_live_tick(void);        // fdd_gw_live.cpp: report a swapped disk
+void fdd_gw_live_started(void);     // ...and when to start doing so
 void panel_tab5_blank_early(void);  // panel_tab5.cpp: kill the backlight and the panel rail
 void usb_msc_restore_phy_map(void);  // usb_msc.cpp: undo USB Mode's PHY swap
 void tab5_backlight_set(int percent);   // panel_tab5.cpp
 bool touch_mouse_init(void);            // touch_mouse.cpp: touch panel as the mouse
 void bt_hid_init(void);                 // bt_hid.cpp: BLE HID host via the ESP32-C6
 bool gw_probe(void);                    // gw_mode.cpp: Greaseweazle on the USB-A port
+bool fdd_gw_live_mount(int drv);        // fdd_gw_live.cpp: the disk in the real drive
+bool fdd_gw_live_is_mark(const char *name);
 void rtc_tab5_sync(void);               // rtc_tab5.cpp: the RX8130CE clock
 void audio_set_volume(int percent);     // audio_codec.cpp
 
@@ -282,6 +290,13 @@ static void emu_task(void *arg) {
     // --- SD (SDMMC 1-bit via BSP: CLK2/CMD1/D0=42/D3=EXIO4, mounted at /sd) ---
     sd_mount();
 
+    // If the last boot went into USB Mode and came back, say how far it got and
+    // write it to the card. After sd_mount() because of the file, and the file
+    // is the point: reading this over the serial port resets the chip, and the
+    // reset clears the RTC memory the record lives in.
+    usb_msc_report_last();
+    usb_msc_dump_log();
+
     // --- USB HID keyboard/mouse, on the USB-A port ---
     // On the ESP32-S3 forks this had to stay off: there is one USB peripheral
     // there, so host mode took the USB-Serial-JTAG console with it. The P4 has
@@ -328,6 +343,15 @@ static void emu_task(void *arg) {
     // (chosen when the S3's 8MB had to cover the frame buffers too) has no
     // reason to stay.
     np2cfg.EXTMEM = 13;
+    // Key repeat. np2kai keeps a buffer of the keys being held and re-sends
+    // the newest one from keyrepeat_proc(), which pccore_exec() calls once a
+    // frame - but only when this is on, and nothing here ever turned it on, so
+    // a held key was sent once and never again. The delay must stay larger
+    // than the interval: keyrepeat_proc() waits (delay - interval) before the
+    // first repeat, and both are unsigned 16-bit.
+    np2cfg.keyrepeat_enable   = 1;
+    np2cfg.keyrepeat_delay    = 500;   // ms held before it starts repeating
+    np2cfg.keyrepeat_interval = 60;    // ms between repeats after that
 #if ENABLE_FM_SOUND
     // PC-9801-26K (YM2203: 3 FM + SSG) — the classic VM21-era FM board. sound_init()
     // (inside pccore_init) reads these; g_sound_enable makes soundmng_create return
@@ -478,8 +502,10 @@ static void emu_task(void *arg) {
     // rather than np2cfg.fddfile — but this must be settled before pccore_init(),
     // which is where bios_initialize() reads the flag.
     const bool have_media = np2cfg.sasihdd[0][0] ||
-                            (have_nvs_disks && saved_fdd0[0] && sd_file_exists(saved_fdd0)) ||
-                            (have_nvs_disks && saved_fdd1[0] && sd_file_exists(saved_fdd1));
+                            (have_nvs_disks && saved_fdd0[0] &&
+                             (sd_file_exists(saved_fdd0) || fdd_gw_live_is_mark(saved_fdd0))) ||
+                            (have_nvs_disks && saved_fdd1[0] &&
+                             (sd_file_exists(saved_fdd1) || fdd_gw_live_is_mark(saved_fdd1)));
     np2cfg.usebios = have_media ? 1 : 0;
     printf("BIOS: media=%d usebios=%d  /bios.rom on SD=%d\n",
            (int)have_media, (int)np2cfg.usebios, (int)sd_file_exists("/bios.rom"));
@@ -505,10 +531,18 @@ static void emu_task(void *arg) {
     //     Mount each saved floppy whose file exists; with no NVS disk data both
     //     drives stay empty and the BIOS drops to N88-BASIC. ---
     if (have_nvs_disks) {
-        if (saved_fdd0[0] && sd_file_exists(saved_fdd0))
+        // A drive that was left holding the physical disk is put back the same
+        // way a file is, so the machine can be booted from a real floppy.
+        if (fdd_gw_live_is_mark(saved_fdd0)) {
+            fdd_gw_live_mount(0);
+        } else if (saved_fdd0[0] && sd_file_exists(saved_fdd0)) {
             diskdrv_readyfddex(0, (const OEMCHAR *)saved_fdd0, FTYPE_NONE, 0);
-        if (saved_fdd1[0] && sd_file_exists(saved_fdd1))
+        }
+        if (fdd_gw_live_is_mark(saved_fdd1)) {
+            fdd_gw_live_mount(1);
+        } else if (saved_fdd1[0] && sd_file_exists(saved_fdd1)) {
             diskdrv_readyfddex(1, (const OEMCHAR *)saved_fdd1, FTYPE_NONE, 0);
+        }
     }
     pccore_cfgupdate();
     printf("disks: nvs=%d fdd1=[%s] fdd2=[%s] hdd=[%s]\n", (int)have_nvs_disks,
@@ -524,6 +558,7 @@ static void emu_task(void *arg) {
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
     banner("running");
+    fdd_gw_live_started();   // start-up mounts are done; later ones are swaps
     printf("free after reset: internal=%u psram=%u largest_psram=%u\n",
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
@@ -588,6 +623,11 @@ static void emu_task(void *arg) {
             rt_emu_us = 0;
             rt_prevcyc = (uint32_t)(CPU_CLOCK + CPU_BASECLOCK - CPU_REMCLOCK);
         }
+
+        // Physical drives stop spinning if nothing asks them for anything,
+        // and a game waiting at a prompt asks for nothing for minutes.
+        gw_live_keepalive();
+        fdd_gw_live_tick();
 
         // Disk-menu CPU row: change the emulated clock at runtime.
         // Replicates np2's own asynccpu clock-change path so every clocked

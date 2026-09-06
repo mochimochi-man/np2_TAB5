@@ -1,5 +1,4 @@
-// Greaseweazle over the USB-A port: read a real floppy in the drive and write
-// it to the SD card as a disk image.
+// Greaseweazle over the USB-A port: read the real floppy in the drive.
 //
 // The Greaseweazle is a USB CDC-ACM device that drives the floppy and hands
 // back RAW FLUX - the time between magnetic transitions, nothing more. Every
@@ -33,15 +32,13 @@
 //   0         end of stream, and the only place a zero can appear
 //
 // The whole path is here: identify the device, spin the drive, capture flux,
-// recover the bitstream, find the sectors, and write the disk out as a raw
-// .HDM that the emulator can mount straight from the menu.
+// recover the bitstream and find the sectors. Nothing is written to a file -
+// fdd_gw_live.cpp serves the sectors straight to the emulator, so a disk is
+// played from the original rather than from a copy of it.
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <stdarg.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -49,8 +46,16 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "usb/cdc_acm_host.h"
+#include "usb/usb_host.h"
+#include "esp_timer.h"
+#include "gw_live.h"
 
 extern "C" int ets_printf(const char *fmt, ...);
+extern "C" bool gw_probe(void);        // defined at the end of this file
+static bool gw_probe_unit(int unit);
+static bool unit_select(int unit);
+static const char *serial_of(uint8_t addr);
+static uint8_t port_of(uint8_t addr);
 
 // The vendor/product pair registered with pid.codes for the Greaseweazle.
 #define GW_VID 0x1209
@@ -76,37 +81,56 @@ enum {
 // streamed into by a task, never an ISR.
 #define GW_RX_CAP (1024 * 1024)
 
-static cdc_acm_dev_hdl_t s_dev = nullptr;
-static uint8_t *s_rx = nullptr;
-static volatile size_t s_rx_len = 0;      // bytes written by the USB callback
-static size_t s_rx_pos = 0;               // bytes consumed by the reader
-static volatile bool s_rx_ovf = false;
-static SemaphoreHandle_t s_rx_sig = nullptr;
-static uint32_t s_freq = 0;               // sample ticks per second
+// Two Greaseweazles, one per floppy drive. A PC-98 has two, and an installer
+// that wants disk B in drive 2 cannot be answered with one. They are told apart
+// by USB address: every Greaseweazle carries the same VID and PID, which is
+// exactly the case cdc_acm_host_open_config_t::dev_addr exists for.
+#define GW_UNITS 2
+
+struct gw_dev {
+    cdc_acm_dev_hdl_t dev;
+    uint8_t          *rx;
+    volatile size_t   rx_len;             // bytes written by the USB callback
+    size_t            rx_pos;             // bytes consumed by the reader
+    volatile bool     rx_ovf;
+    SemaphoreHandle_t rx_sig;
+    uint32_t          freq;               // sample ticks per second
+    uint8_t           addr;               // USB device address, 0 = not found
+};
+
+static gw_dev s_gw[GW_UNITS];
+
+// The unit every helper below works on. The emulator serialises floppy access
+// through the FDC, so one at a time is all that is ever needed, and a current
+// unit keeps the command helpers as short as they were.
+static gw_dev *g = &s_gw[0];
 
 // ---- transport -------------------------------------------------------------
-// Append-only: the callback is the sole writer and only ever advances s_rx_len,
-// the reader is the sole reader and only ever advances s_rx_pos behind it. That
+// Append-only: the callback is the sole writer and only ever advances g->rx_len,
+// the reader is the sole reader and only ever advances g->rx_pos behind it. That
 // removes the need for a lock on the data itself, which matters because these
 // buffers arrive a thousand times a second during a track read.
 static bool rx_cb(const uint8_t *data, size_t len, void *arg) {
-    (void)arg;
-    const size_t room = GW_RX_CAP - s_rx_len;
+    // Whose data this is comes from the callback argument, not from the
+    // current unit: with two devices open, the other one's driver task can be
+    // delivering while this one is being read.
+    gw_dev *d = (gw_dev *)arg;
+    const size_t room = GW_RX_CAP - d->rx_len;
     if (len > room) {
-        s_rx_ovf = true;
+        d->rx_ovf = true;
         len = room;
     }
-    memcpy(s_rx + s_rx_len, data, len);
-    s_rx_len = s_rx_len + len;
-    xSemaphoreGive(s_rx_sig);
+    memcpy(d->rx + d->rx_len, data, len);
+    d->rx_len = d->rx_len + len;
+    xSemaphoreGive(d->rx_sig);
     return true;   // we took the buffer
 }
 
 static void rx_reset(void) {
-    s_rx_len = 0;
-    s_rx_pos = 0;
-    s_rx_ovf = false;
-    xSemaphoreTake(s_rx_sig, 0);
+    g->rx_len = 0;
+    g->rx_pos = 0;
+    g->rx_ovf = false;
+    xSemaphoreTake(g->rx_sig, 0);
 }
 
 // Wait for `want` more bytes and take them. The device answers a command within
@@ -115,39 +139,39 @@ static void rx_reset(void) {
 static bool rx_take(uint8_t *out, size_t want, int timeout_ms) {
     const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
     for (;;) {
-        if (s_rx_len - s_rx_pos >= want) {
-            memcpy(out, s_rx + s_rx_pos, want);
-            s_rx_pos += want;
+        if (g->rx_len - g->rx_pos >= want) {
+            memcpy(out, g->rx + g->rx_pos, want);
+            g->rx_pos += want;
             return true;
         }
         if (xTaskGetTickCount() >= deadline) {
             return false;
         }
-        xSemaphoreTake(s_rx_sig, pdMS_TO_TICKS(20));
+        xSemaphoreTake(g->rx_sig, pdMS_TO_TICKS(20));
     }
 }
 
 // Scan forward for the stream terminator, waiting for more data as needed.
 static bool rx_wait_zero(size_t *end, int timeout_ms) {
     const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
-    size_t scan = s_rx_pos;
+    size_t scan = g->rx_pos;
     for (;;) {
-        const size_t have = s_rx_len;
+        const size_t have = g->rx_len;
         while (scan < have) {
-            if (s_rx[scan] == 0) {
+            if (g->rx[scan] == 0) {
                 *end = scan;
                 return true;
             }
             scan++;
         }
-        if (s_rx_ovf) {
+        if (g->rx_ovf) {
             ets_printf("gw: receive buffer overflowed\n");
             return false;
         }
         if (xTaskGetTickCount() >= deadline) {
             return false;
         }
-        xSemaphoreTake(s_rx_sig, pdMS_TO_TICKS(20));
+        xSemaphoreTake(g->rx_sig, pdMS_TO_TICKS(20));
     }
 }
 
@@ -156,7 +180,7 @@ static bool rx_wait_zero(size_t *end, int timeout_ms) {
 // the stream has lost sync rather than that the command failed.
 static bool gw_cmd(const uint8_t *cmd, size_t len, int timeout_ms = 1000) {
     rx_reset();
-    if (cdc_acm_host_data_tx_blocking(s_dev, cmd, len, 1000) != ESP_OK) {
+    if (cdc_acm_host_data_tx_blocking(g->dev, cmd, len, 1000) != ESP_OK) {
         ets_printf("gw: tx failed (cmd %u)\n", cmd[0]);
         return false;
     }
@@ -214,7 +238,7 @@ static bool gw_get_info(void) {
     }
     // <4B I 4B 3H 14x
     const uint8_t major = d[0], minor = d[1], is_main = d[2], max_cmd = d[3];
-    s_freq = (uint32_t)d[4] | ((uint32_t)d[5] << 8) |
+    g->freq = (uint32_t)d[4] | ((uint32_t)d[5] << 8) |
              ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
     const uint8_t hw_model = d[8], hw_submodel = d[9], usb_speed = d[10];
     const uint16_t mcu_mhz = (uint16_t)(d[12] | (d[13] << 8));
@@ -228,11 +252,11 @@ static bool gw_get_info(void) {
                usb_speed ? "high speed" : "full speed");
     // No floats in ets_printf, so the tick period is printed in picoseconds.
     ets_printf("gw: sample_freq %u Hz (%u ps per tick)\n",
-               (unsigned)s_freq,
-               s_freq ? (unsigned)(1000000000000ULL / s_freq) : 0u);
+               (unsigned)g->freq,
+               g->freq ? (unsigned)(1000000000000ULL / g->freq) : 0u);
     ets_printf("gw: mcu %u MHz, %u KB SRAM, %u KB USB buffer\n",
                mcu_mhz, mcu_sram_kb, usb_buf_kb);
-    return s_freq != 0;
+    return g->freq != 0;
 }
 
 // The drive timings, which the device keeps in its own settings until told
@@ -247,7 +271,7 @@ static bool gw_set_delays(void) {
         10000,   // step, us
         15,      // seek settle, ms
         2000,    // motor spin-up, ms - the whole point of this
-        10000,   // watchdog, ms
+        30000,   // watchdog, ms - long gaps between reads are normal here
     };
     uint8_t cmd[13] = {CMD_SETPARAMS, 13, 0 /*Params.Delays*/};
     for (int i = 0; i < 5; i++) {
@@ -270,8 +294,9 @@ struct flux_stats {
 typedef void (*flux_sink_t)(uint32_t ticks, void *arg);
 
 static bool decode_flux(const uint8_t *p, size_t n, flux_stats &st,
-                        flux_sink_t sink = nullptr, void *arg = nullptr) {
-    const uint32_t bucket = s_freq / 4000000;    // ticks per 0.25us
+                        flux_sink_t sink = nullptr, void *arg = nullptr,
+                        bool cue_at_index = false) {
+    const uint32_t bucket = g->freq / 4000000;    // ticks per 0.25us
     memset(&st, 0, sizeof st);
     if (bucket == 0) {
         return false;
@@ -279,6 +304,8 @@ static bool decode_flux(const uint8_t *p, size_t n, flux_stats &st,
     size_t i = 0;
     uint32_t ticks = 0;              // accumulated since the last transition
     int64_t since_index = 0;         // may go negative, exactly as upstream
+    bool sink_cued = !cue_at_index;
+    bool first_after_index = false;
     while (i < n) {
         const uint8_t b = p[i++];
         if (b == 255) {
@@ -297,6 +324,10 @@ static bool decode_flux(const uint8_t *p, size_t n, flux_stats &st,
                 }
                 st.nindex++;
                 since_index = -(int64_t)(ticks + v);
+                if (cue_at_index && !sink_cued) {
+                    sink_cued = true;
+                    first_after_index = true;
+                }
             } else if (op == 2) {                // Space
                 ticks += v;
             } else {
@@ -315,8 +346,16 @@ static bool decode_flux(const uint8_t *p, size_t n, flux_stats &st,
             }
             ticks += v;
             st.transitions++;
-            if (sink) {
-                sink(ticks, arg);
+            if (sink && sink_cued) {
+                if (first_after_index) {
+                    const int64_t clipped = since_index + ticks;
+                    if (clipped > 0) {
+                        sink((uint32_t)clipped, arg);
+                    }
+                    first_after_index = false;
+                } else {
+                    sink(ticks, arg);
+                }
             }
             const uint32_t k = ticks / bucket;
             st.hist[(k < HIST_BUCKETS) ? k : (HIST_BUCKETS - 1)]++;
@@ -348,7 +387,8 @@ static bool decode_flux(const uint8_t *p, size_t n, flux_stats &st,
 
 #define MAX_BITS (2048 * 1024)          // enough for five revolutions at 500kbps
 #define MAX_SECT 32
-#define SECT_STRIDE 1024        // the largest sector this decodes
+#define SECT_STRIDE GW_SECT_MAX_LEN   // 2048: N=4 sectors turn up on
+                                      // protected tracks and must fit
 
 static uint8_t *s_bits = nullptr;
 
@@ -415,7 +455,7 @@ static void pll_sink(uint32_t flux, void *arg) {
 // the cell time. Weighting across the peak recovers more precision than the
 // quarter-microsecond buckets have on their own.
 static float estimate_cell(const flux_stats &st) {
-    const uint32_t bucket = s_freq / 4000000;
+    const uint32_t bucket = g->freq / 4000000;
     const uint32_t floor_count = st.transitions / 20;
     int k0 = -1, k1 = -1;
     for (int k = 1; k < HIST_BUCKETS; k++) {
@@ -469,12 +509,18 @@ struct sect_hit {
     bool     id_ok;
     bool     data_ok;
     bool     deleted;
+    bool     fm;         // found by the single-density pass
     int      seen;
 };
 
-static int sect_find(const sect_hit *v, int cnt, uint8_t c, uint8_t h, uint8_t r) {
+// All four ID bytes, because that is what the controller compares. Two
+// sectors on one track can share a number and differ in size - it is a common
+// way to protect a disk - and folding them together loses the one the guest
+// is looking for.
+static int sect_find(const sect_hit *v, int cnt, uint8_t c, uint8_t h,
+                    uint8_t r, uint8_t n) {
     for (int k = 0; k < cnt; k++) {
-        if (v[k].c == c && v[k].h == h && v[k].r == r) {
+        if (v[k].c == c && v[k].h == h && v[k].r == r && v[k].n == n) {
             return k;
         }
     }
@@ -511,7 +557,7 @@ static int mfm_scan(uint32_t nbits, sect_hit *out, int max_out,
                 pending = -1;                        // do not trust the header
                 continue;
             }
-            int k = sect_find(out, cnt, id[0], id[1], id[2]);
+            int k = sect_find(out, cnt, id[0], id[1], id[2], id[3]);
             if (k < 0) {
                 if (cnt >= max_out) {
                     continue;
@@ -558,8 +604,23 @@ static int mfm_scan(uint32_t nbits, sect_hit *out, int max_out,
             crc = crc16_ccitt(tail, 2, crc);
             out[slot].data_ok = (crc == 0);
             out[slot].deleted = (mark == 0xf8);
-            i = p;                                   // skip past what we read
-            sr = 0;
+            // Deliberately NOT skipping to the end of the data field.
+            //
+            // The length read above comes from the sector's own N, and a
+            // protected track is exactly where that number cannot be trusted:
+            // declaring a sector larger than it really is makes an ordinary
+            // read run off the end and fail, which is the check. Skipping by
+            // the declared length then steps over the address mark of whatever
+            // follows, and that sector vanishes from the track - which is what
+            // was happening here, with R1 disappearing behind a 2048-byte
+            // R240 and the sector count changing from one capture to the next.
+            //
+            // A real FDC never skips; it hunts for the next address mark
+            // continuously. So does this now. Scanning back over the data
+            // costs a little time and cannot produce a false sector: the sync
+            // pattern is an A1 with a missing clock bit, which legal MFM data
+            // cannot contain, and anything that did slip through would still
+            // have to pass the ID CRC.
         }
     }
     return cnt;
@@ -575,6 +636,90 @@ struct track_out {
     unsigned rpm10;
 };
 
+// Single density. See the note at the top of the FM patch: same clock/data
+// interleave as MFM, different address marks, no A1 preamble in the CRC, and
+// bit cells twice as long - which is why this runs over its own pass of the
+// flux rather than the one MFM used.
+#define FM_AM_ID      0xf57e
+#define FM_AM_DATA    0xf56f
+#define FM_AM_DELETED 0xf56a
+
+static int fm_scan(uint32_t nbits, sect_hit *out, int max_out,
+                   uint8_t *data, size_t dcap) {
+    int cnt = 0;
+    int pending = -1;
+    uint32_t sr = 0;
+
+
+    for (uint32_t i = 0; i < nbits; i++) {
+        sr = (sr << 1) | s_bits[i];
+        const uint16_t w = (uint16_t)sr;
+
+        if (w == FM_AM_ID) {
+            uint32_t p = i + 1;
+            uint8_t id[6];
+            for (int k = 0; k < 6; k++) {
+                id[k] = mfm_byte(&p, nbits);
+            }
+            const uint8_t mark = 0xfe;
+            uint16_t crc = crc16_ccitt(&mark, 1, 0xffff);
+            crc = crc16_ccitt(id, 6, crc);
+            if (crc != 0) {
+                pending = -1;
+                continue;
+            }
+            int k = sect_find(out, cnt, id[0], id[1], id[2], id[3]);
+            if (k < 0) {
+                if (cnt >= max_out) {
+                    continue;
+                }
+                k = cnt++;
+                memset(&out[k], 0, sizeof(out[k]));
+                out[k].c = id[0];
+                out[k].h = id[1];
+                out[k].r = id[2];
+                out[k].n = id[3];
+                out[k].fm = true;
+            }
+            out[k].id_ok = true;
+            out[k].seen++;
+            pending = k;
+
+        } else if (w == FM_AM_DATA || w == FM_AM_DELETED) {
+            if (pending < 0) {
+                continue;
+            }
+            const int slot = pending;
+            pending = -1;
+            if (out[slot].data_ok) {
+                continue;
+            }
+            const uint32_t len = 128u << (out[slot].n & 7);
+            uint8_t *dst = (data && len <= SECT_STRIDE &&
+                            (size_t)(slot + 1) * SECT_STRIDE <= dcap)
+                           ? data + (size_t)slot * SECT_STRIDE : nullptr;
+            const uint8_t mark = (w == FM_AM_DATA) ? 0xfb : 0xf8;
+            uint32_t p = i + 1;
+            uint16_t crc = crc16_ccitt(&mark, 1, 0xffff);
+            for (uint32_t k = 0; k < len; k++) {
+                const uint8_t b = mfm_byte(&p, nbits);
+                crc = crc16_ccitt(&b, 1, crc);
+                if (dst) {
+                    dst[k] = b;
+                }
+            }
+            uint8_t tail[2];
+            tail[0] = mfm_byte(&p, nbits);
+            tail[1] = mfm_byte(&p, nbits);
+            crc = crc16_ccitt(tail, 2, crc);
+            out[slot].data_ok = (crc == 0);
+            out[slot].deleted = (w == FM_AM_DELETED);
+            i = p - 1;
+        }
+    }
+    return cnt;
+}
+
 // Recover the bitstream from a flux capture and pick the sectors out of it.
 static bool track_decode(const uint8_t *stream, size_t n, const flux_stats &st,
                          track_out &out, bool verbose, float cell_bias) {
@@ -586,9 +731,9 @@ static bool track_decode(const uint8_t *stream, size_t n, const flux_stats &st,
         }
         return false;
     }
-    out.kbps = (unsigned)((float)s_freq / (2.0f * out.cell) / 1000.0f);
+    out.kbps = (unsigned)((float)g->freq / (2.0f * out.cell) / 1000.0f);
     if (verbose) {
-        const unsigned cell_ns = (unsigned)(out.cell * 1000000000.0f / (float)s_freq);
+        const unsigned cell_ns = (unsigned)(out.cell * 1000000000.0f / (float)g->freq);
         ets_printf("gw:   cell %u.%u ticks = %u ns  ->  %u kbps  (%s)\n",
                    (unsigned)out.cell, ((unsigned)(out.cell * 10)) % 10,
                    cell_ns, out.kbps, (out.kbps > 375) ? "2HD" : "2DD");
@@ -603,7 +748,7 @@ static bool track_decode(const uint8_t *stream, size_t n, const flux_stats &st,
     }
     pll_state pll = {out.cell, out.cell, 0.0f, 0};
     flux_stats ignored;
-    if (!decode_flux(stream, n, ignored, pll_sink, &pll)) {
+    if (!decode_flux(stream, n, ignored, pll_sink, &pll, true)) {
         return false;
     }
     if (out.data) {
@@ -611,6 +756,42 @@ static bool track_decode(const uint8_t *stream, size_t n, const flux_stats &st,
     }
     out.nsect = mfm_scan(pll.nbits, out.hit, MAX_SECT,
                          out.data, (size_t)MAX_SECT * SECT_STRIDE);
+
+    // Single density comes in two shapes on a 2HD disk: written at half the
+    // data rate, where the cells are twice as long, and written at the full
+    // rate, where they are the same length as the MFM ones around them. The
+    // second kind is already sitting in the bitstream that has just been
+    // recovered, so look there first - it costs nothing.
+    if (out.nsect < MAX_SECT) {
+        const int base = out.nsect;
+        const int got = fm_scan(pll.nbits, out.hit + base, MAX_SECT - base,
+                                out.data ? out.data + (size_t)base * SECT_STRIDE : nullptr,
+                                (size_t)(MAX_SECT - base) * SECT_STRIDE);
+        if (got > 0) {
+            ets_printf("gw:   %d single-density sector%s at the MFM cell time\n",
+                       got, got == 1 ? "" : "s");
+        }
+        out.nsect += got;
+    }
+
+    // ...and again at twice the cell time, for the half-rate kind. A track with
+    // neither costs one more pass over the flux and finds nothing, which is the
+    // usual case and cheap beside the half-second it took to capture.
+    if (out.nsect < MAX_SECT) {
+        pll_state fmpll = {out.cell * 2.0f, out.cell * 2.0f, 0.0f, 0};
+        flux_stats ignored2;
+        if (decode_flux(stream, n, ignored2, pll_sink, &fmpll, true)) {
+            const int base = out.nsect;
+            const int got = fm_scan(fmpll.nbits, out.hit + base, MAX_SECT - base,
+                                    out.data ? out.data + (size_t)base * SECT_STRIDE : nullptr,
+                                    (size_t)(MAX_SECT - base) * SECT_STRIDE);
+            if (got > 0) {
+                ets_printf("gw:   %d single-density sector%s at half the data rate\n",
+                           got, got == 1 ? "" : "s");
+            }
+            out.nsect += got;
+        }
+    }
 
     if (verbose) {
         int good = 0;
@@ -653,9 +834,9 @@ static bool track_read(int cyl, int head, int revs, track_out &out, bool verbose
     if (!ok) {
         ets_printf("gw: flux stream did not terminate\n");
     } else {
-        const uint8_t *p = s_rx + s_rx_pos;
-        const size_t n = end - s_rx_pos;
-        s_rx_pos = end + 1;
+        const uint8_t *p = g->rx + g->rx_pos;
+        const size_t n = end - g->rx_pos;
+        g->rx_pos = end + 1;
 
         flux_stats st;
         ok = decode_flux(p, n, st);
@@ -663,7 +844,7 @@ static bool track_read(int cyl, int head, int revs, track_out &out, bool verbose
             ets_printf("gw: could not decode the flux stream\n");
         } else {
             out.rpm10 = (st.nindex > 1 && st.index_ticks[1])
-                        ? (unsigned)((uint64_t)600 * s_freq / st.index_ticks[1]) : 0;
+                        ? (unsigned)((uint64_t)600 * g->freq / st.index_ticks[1]) : 0;
             if (verbose) {
                 ets_printf("gw: cyl %d head %d: %u flux bytes, %u transitions, %d index\n",
                            cyl, head, (unsigned)n, (unsigned)st.transitions, st.nindex);
@@ -672,11 +853,11 @@ static bool track_read(int cyl, int head, int revs, track_out &out, bool verbose
                     if (!t) {
                         continue;
                     }
-                    const unsigned ms100 = (unsigned)((uint64_t)t * 100000ULL / s_freq);
+                    const unsigned ms100 = (unsigned)((uint64_t)t * 100000ULL / g->freq);
                     ets_printf("gw:   rev %d: %u.%02u ms  =  %u.%u rpm\n", k,
                                ms100 / 100, ms100 % 100,
-                               (unsigned)((uint64_t)600 * s_freq / t) / 10,
-                               (unsigned)((uint64_t)600 * s_freq / t) % 10);
+                               (unsigned)((uint64_t)600 * g->freq / t) / 10,
+                               (unsigned)((uint64_t)600 * g->freq / t) % 10);
                 }
                 ets_printf("gw:   interval histogram (peaks):\n");
                 const uint32_t floor_count = st.transitions / 500;
@@ -688,7 +869,7 @@ static bool track_read(int cyl, int head, int revs, track_out &out, bool verbose
                     }
                 }
             }
-            // Both passes read out of s_rx, so they have to finish before the
+            // Both passes read out of g->rx, so they have to finish before the
             // next command resets it.
             ok = track_decode(p, n, st, out, verbose, cell_bias);
         }
@@ -699,379 +880,242 @@ static bool track_read(int cyl, int head, int revs, track_out &out, bool verbose
     return ok;
 }
 
-// Progress goes two places: the serial log, in full, and whatever the caller
-// wants to put it on. The menu passes a function that draws it on the panel,
-// so a two-minute read is not two minutes of a blank screen.
-typedef void (*gw_progress_fn)(const char *text);
-static gw_progress_fn s_prog = nullptr;
+// ---- live reading ----------------------------------------------------------
+// The same capture and decode the dump uses, but handing the sectors back to
+// the caller instead of writing them to a file. fdd_gw_live.cpp serves the
+// emulator's floppy accesses out of this, so a disk never has to be turned into
+// an image - and a protected one keeps the sectors an image cannot hold.
 
-static void prog(const char *fmt, ...) {
-    char buf[96];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    ets_printf("gw: %s\n", buf);
-    if (s_prog) {
-        s_prog(buf);
+static track_out s_live[GW_UNITS];   // one track's worth per unit
+static bool s_live_on[GW_UNITS];     // ...and whether a disk is mounted on it
+static bool s_spun[GW_UNITS];        // ...and whether its spindle is turning
+static int64_t s_used_us[GW_UNITS];  // ...and when the machine last read from it
+static uint32_t s_rests[GW_UNITS];   // ...and how many times it has been let stop
+
+// How long the spindle keeps turning after the last read. Long enough that a
+// game loading track after track never spins down between them, short enough
+// that a machine sitting at a prompt is not wearing the disk while it waits.
+#define GW_IDLE_HOLD_US 10000000
+#define GW_SPINUP_MS    2000        // a 5.25-inch spindle, measured
+
+// Select the unit every helper below works on. Out of range, or a unit with no
+// Greaseweazle behind it, and nothing is selected.
+static bool unit_select(int unit) {
+    if (unit < 0 || unit >= GW_UNITS) {
+        return false;
     }
+    g = &s_gw[unit];
+    return true;
 }
 
-// ---- NFD r0 ----------------------------------------------------------------
-// The output format. A raw image holds nothing but the bytes, so a sector that
-// would not read comes out looking exactly like one that read as zeros; NFD
-// carries a status per sector, which is the difference between an image that
-// is honest about its gaps and one that is not.
-//
-// The layout is fixed by the struct the emulator reads it with
-// (diskimage/fd/fdd_head_nfd.h, NFD_FILE_HEAD):
-//
-//   0x000  "T98FDDIMAGE.R0"                15 bytes plus one reserved
-//   0x010  comment                         0x100 bytes, NUL terminated
-//   0x110  dwHeadSize                      u32, always the value below
-//   0x114  flProtect                       nonzero = write protected
-//   0x115  byHead                          number of heads
-//   0x120  si[163][26]                     sector IDs, 16 bytes each
-//   ...    0x10 reserved, then the sector data in si order
-//
-// and each sector ID is
-//
-//   C H R N  flMFM flDDAM byStatus byST0 byST1 byST2 byPDA  5 reserved
-//
-// with C = 0xFF meaning there is no sector there. Track number is
-// cylinder * 2 + head (nfd_track_index() in fdd_nfd.c), and the data follows
-// in exactly that order - which is the same order a raw image uses, so the
-// only thing that changes about the writing below is that a header goes in
-// front of it.
-
-#define NFD_TRKMAX     163
-#define NFD_SECMAX     26
-#define NFD_HDRSIZE    (288 + 16 * NFD_TRKMAX * NFD_SECMAX + 0x10)
-#define NFD_SI_BASE    0x120
-
-// FDD BIOS result codes, as the emulator hands them back to the guest
-// (fddlasterror = byStatus in fdd_nfd.c).
-#define NFD_OK         0x00
-#define NFD_CRC_ERROR  0xa0
-#define NFD_NO_DATA    0xe0
-
-static inline uint8_t *nfd_entry(uint8_t *h, int trk, int r) {
-    return h + NFD_SI_BASE + ((size_t)trk * NFD_SECMAX + (r - 1)) * 16;
-}
-
-static void nfd_header_init(uint8_t *h, int cyls, int spt, int ncode) {
-    memset(h, 0, NFD_HDRSIZE);
-    memcpy(h, "T98FDDIMAGE.R0", 14);
-
-    // The clock is set by now if it is ever going to be, so the image can say
-    // when it was taken - which is the only place a date is needed, the file
-    // itself being named by a counter.
-    const time_t now = time(nullptr);
-    struct tm tmv;
-    localtime_r(&now, &tmv);
-    char *comment = (char *)h + 0x10;
-    if (tmv.tm_year > 100) {
-        snprintf(comment, 0x100, "np2 espresso Tab5  %04d-%02d-%02d %02d:%02d",
-                 tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-                 tmv.tm_hour, tmv.tm_min);
-    } else {
-        snprintf(comment, 0x100, "np2 espresso Tab5");
+extern "C" bool gw_live_begin(int unit) {
+    if (!unit_select(unit)) {
+        return false;
     }
-
-    h[0x110] = (uint8_t)(NFD_HDRSIZE & 0xff);
-    h[0x111] = (uint8_t)((NFD_HDRSIZE >> 8) & 0xff);
-    h[0x112] = (uint8_t)((NFD_HDRSIZE >> 16) & 0xff);
-    h[0x113] = (uint8_t)((NFD_HDRSIZE >> 24) & 0xff);
-    h[0x114] = 0;          // not write protected
-    h[0x115] = 2;          // heads
-
-    // Everything is "no sector" until a real one is put in its place.
-    for (int i = 0; i < NFD_TRKMAX * NFD_SECMAX; i++) {
-        h[NFD_SI_BASE + (size_t)i * 16] = 0xff;
+    if (!g->dev && !gw_probe_unit(unit)) {
+        return false;
     }
-
-    // The physical drive address, chosen the same way the emulator chooses it
-    // when it formats a disk of its own (fdd_nfd.c).
-    uint8_t pda = 0x90;                       // 2HD, 1.2MB
-    if (ncode == 2) {
-        if (spt < 10) {
-            pda = 0x10;
-        } else if (spt > 16) {
-            pda = 0x30;
+    track_out &live = s_live[unit];
+    if (!live.data) {
+        live.data = (uint8_t *)heap_caps_malloc((size_t)MAX_SECT * SECT_STRIDE,
+                                                MALLOC_CAP_SPIRAM);
+        if (!live.data) {
+            ets_printf("gw: out of memory for the live track\n");
+            return false;
         }
     }
-    for (int cyl = 0; cyl < cyls; cyl++) {
-        for (int head = 0; head < 2; head++) {
-            const int trk = cyl * 2 + head;
-            for (int r = 1; r <= spt; r++) {
-                uint8_t *e = nfd_entry(h, trk, r);
-                e[0] = (uint8_t)cyl;
-                e[1] = (uint8_t)head;
-                e[2] = (uint8_t)r;
-                e[3] = (uint8_t)ncode;
-                e[4] = 1;                     // MFM
-                e[5] = 0;                     // not a deleted-data mark
-                e[6] = NFD_OK;
-                e[10] = pda;
-            }
-        }
+    if (!gw_cmd3(CMD_SETBUSTYPE, BUS_IBMPC) || !gw_set_delays()) {
+        return false;
     }
+    if (!gw_cmd3(CMD_SELECT, 0) || !gw_motor(0, true)) {
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(GW_SPINUP_MS));
+    s_live_on[unit] = true;
+    s_spun[unit] = true;
+    s_used_us[unit] = esp_timer_get_time();
+    ets_printf("gw: unit %d ready, hub port %u (USB address %u, serial %s)\n",
+               unit, port_of(g->addr), g->addr, serial_of(g->addr));
+    return true;
 }
 
-// Records how a sector actually read. grade is the same 0/1/2 the dump loop
-// uses: never seen, decoded but the CRC failed, clean.
-static void nfd_mark(uint8_t *h, int trk, int r, int grade, bool deleted) {
-    uint8_t *e = nfd_entry(h, trk, r);
-    if (grade == 2) {
-        e[5] = deleted ? 1 : 0;
-        return;
-    }
-    if (grade == 1) {
-        e[6] = NFD_CRC_ERROR;
-        e[8] = 0x20;                          // ST1 DE  - data error
-        e[9] = 0x20;                          // ST2 DD  - in the data field
-    } else {
-        e[6] = NFD_NO_DATA;
-        e[7] = 0x40;                          // ST0 abnormal termination
-        e[8] = 0x01;                          // ST1 MA  - missing address mark
-    }
-}
-
-// ---- whole disk ------------------------------------------------------------
-#define DUMP_REVS    3          // two complete revolutions per capture
-#define DUMP_REVS_SLOW 5        // four, once a track has proved difficult
-#define DUMP_RETRIES 10         // captures per track before giving up on it
-#define DUMP_DIR     "/sd"
-
-// How many cylinders a disk of this shape has. The emulator recognises a raw
-// image purely by its size (fdd_set_xdf), so this has to be right or the
-// result will not mount - which is also why the cylinder count is not simply
-// probed until the reads stop working.
-static int cyls_for(int spt, int n, unsigned kbps) {
-    if (kbps > 375 && spt == 8 && n == 3) {
-        return 77;              // PC-98 2HD 1.25MB - the .HDM this mostly means
-    }
-    return 80;                  // 2HC, 1.44MB and every 2DD layout
-}
-
-// Dumps are numbered rather than dated: the number cannot collide and needs no
-// clock. The date goes in two places that do not need it to be in the name -
-// the file's own timestamp, and the comment inside the image.
-static bool next_dump_name(char *out, size_t cap) {
-    for (int i = 1; i <= 9999; i++) {
-        snprintf(out, cap, "%s/FD%04d.NFD", DUMP_DIR, i);
-        struct stat sb;
-        if (stat(out, &sb) != 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-extern "C" bool gw_dump_disk(gw_progress_fn progress) {
-    s_prog = progress;
-    if (!s_dev) {
-        prog("no Greaseweazle on the USB port");
+// Put the drive back under our control after it has slipped out of it.
+//
+// A live-mounted disk is read on demand, so the gap between one track and the
+// next is however long the machine takes to ask - a second while a file
+// manager redraws, a minute while nobody touches anything. The Greaseweazle
+// does not hold a drive selected and its motor running across a gap like that,
+// and the next command then comes back
+//
+//     gw: cmd 2 failed, status 7          (Seek, No_Unit)
+//     gwfdd1: C0 H1 unreadable
+//
+// which the cache remembers as an empty track - so the file the machine was
+// opening reads back as nothing at all. Reading straight through a disk never
+// showed it: those tracks follow each other closely enough that the drive is
+// never left alone.
+//
+// The whole opening sequence is repeated rather than just the select, because
+// if the device went away and came back it has forgotten the bus type and the
+// step delays too.
+static bool gw_rearm(int unit) {
+    if (!g->dev) {
         return false;
     }
     if (!gw_cmd3(CMD_SETBUSTYPE, BUS_IBMPC) || !gw_set_delays() ||
         !gw_cmd3(CMD_SELECT, 0) || !gw_motor(0, true)) {
         return false;
     }
-    vTaskDelay(pdMS_TO_TICKS(200));            // the command above did the waiting
+    vTaskDelay(pdMS_TO_TICKS(GW_SPINUP_MS));   // it has to be up to speed
+    s_spun[unit] = true;
+    ets_printf("gw: unit %d re-selected\n", unit);
+    return true;
+}
 
-    track_out tr = {};
-    tr.data = (uint8_t *)heap_caps_malloc((size_t)MAX_SECT * SECT_STRIDE,
-                                          MALLOC_CAP_SPIRAM);
-    uint8_t *tbuf = (uint8_t *)heap_caps_malloc((size_t)MAX_SECT * SECT_STRIDE,
-                                                MALLOC_CAP_SPIRAM);
-    uint8_t *hdr = (uint8_t *)heap_caps_malloc(NFD_HDRSIZE, MALLOC_CAP_SPIRAM);
-    FILE *f = nullptr;
-    bool ok = (tr.data && tbuf && hdr);
-
-    // Cylinder zero decides the shape of the whole disk.
-    int spt = 0, ncode = 0, cyls = 0;
-    size_t seclen = 0;
-    if (ok) {
-        ok = track_read(0, 0, DUMP_REVS, tr, true);
-        if (!ok) {
-            ets_printf("gw: cylinder 0 is unreadable - is there a disk in the drive?\n");
-        }
+extern "C" void gw_live_end(int unit) {
+    if (!unit_select(unit)) {
+        return;
     }
-    if (ok) {
-        for (int k = 0; k < tr.nsect; k++) {
-            if (tr.hit[k].r > spt) {
-                spt = tr.hit[k].r;
-            }
-        }
-        ncode = tr.hit[0].n & 7;
-        seclen = (size_t)128 << ncode;
-        cyls = cyls_for(spt, ncode, tr.kbps);
-        ok = (spt > 0 && seclen <= SECT_STRIDE);
-        ets_printf("gw: %d cyl x 2 head x %d sect x %u bytes = %u bytes (%s, %u.%u rpm)\n",
-                   cyls, spt, (unsigned)seclen,
-                   (unsigned)((size_t)cyls * 2 * spt * seclen),
-                   (tr.kbps > 375) ? "2HD" : "2DD", tr.rpm10 / 10, tr.rpm10 % 10);
+    s_live_on[unit] = false;
+    s_spun[unit] = false;
+    if (g->dev) {
+        gw_motor(0, false);
+        gw_cmd2(CMD_DESELECT);
     }
+}
 
-    char path[64] = {0};
-    if (ok) {
-        ok = next_dump_name(path, sizeof(path));
-        if (ok) {
-            f = fopen(path, "wb");
-            ok = (f != nullptr);
+// Bring the spindle up to speed, if it is not already. The wait is the whole
+// point: asking for flux before the disk is turning returns no index at all,
+// and the retries that follow cost far more than waiting once.
+static bool gw_spin_up(int unit) {
+    if (s_spun[unit]) {
+        return true;
+    }
+    if (!gw_cmd3(CMD_SELECT, 0) || !gw_motor(0, true)) {
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(GW_SPINUP_MS));
+    s_spun[unit] = true;
+    return true;
+}
+
+// Called from the emulator's own loop, which is also where reads come from, so
+// there is no second thread to race against and no lock to take. It holds the
+// motor on through a burst of reads, and lets it go once the machine has
+// stopped asking - so the disk turns while it is being used and rests when it
+// is not.
+extern "C" void gw_live_keepalive(void) {
+    static int64_t due_us = 0;
+    const int64_t now = esp_timer_get_time();
+
+    if (now < due_us) {
+        return;
+    }
+    due_us = now + 3000000;         // comfortably inside the 30s watchdog
+
+    for (int u = 0; u < GW_UNITS; u++) {
+        if (!s_live_on[u] || !s_spun[u] || !unit_select(u) || !g->dev) {
+            continue;
         }
-        if (!ok) {
-            ets_printf("gw: could not create a file on the SD card\n");
+        if (now - s_used_us[u] < GW_IDLE_HOLD_US) {
+            gw_motor(0, true);          // still in use: keep it turning
         } else {
-            ets_printf("gw: writing %s\n", path);
-            // Written now so the sector data lands at the right offset, and
-            // again at the end once every sector's status is known.
-            nfd_header_init(hdr, cyls, spt, ncode);
-            ok = fwrite(hdr, 1, NFD_HDRSIZE, f) == NFD_HDRSIZE;
-            if (!ok) {
-                ets_printf("gw: could not write the header - SD card full?\n");
-            }
+            gw_motor(0, false);
+            gw_cmd2(CMD_DESELECT);
+            s_spun[u] = false;
+            s_rests[u]++;   // a stopped drive is a drive whose disk can change
+            ets_printf("gw: unit %d idle - motor off\n", u);
         }
     }
+}
 
-    int bad_total = 0, missing_total = 0, odd_tracks = 0, clean_total = 0;
-    const int want_total = cyls * 2 * spt;
-    for (int cyl = 0; ok && cyl < cyls; cyl++) {
-        for (int head = 0; ok && head < 2; head++) {
-            // 0 = never seen, 1 = decoded but the CRC failed, 2 = clean.
-            uint8_t got[MAX_SECT] = {0};
-            bool odd = false;
-            memset(tbuf, 0, (size_t)MAX_SECT * SECT_STRIDE);
-
-            for (int attempt = 0; attempt < DUMP_RETRIES; attempt++) {
-                if (attempt && (attempt % 2) == 0) {
-                    // Re-reading a marginal track without moving the head just
-                    // reads the same marginal flux again. Stepping away and
-                    // back re-seats it, which is often all a sector that keeps
-                    // failing its CRC needs.
-                    gw_cmd3(CMD_SEEK, (uint8_t)((cyl > 2) ? cyl - 2 : cyl + 2));
-                    vTaskDelay(pdMS_TO_TICKS(20));
-                }
-                // A sector right on the edge of readable can decode with a
-                // clock a fraction off the measured one and not with the
-                // measured one itself. Each attempt is a fresh capture
-                // regardless, so trying a different hypothesis each time
-                // costs nothing and picks up sectors that otherwise stick.
-                static const float bias[DUMP_RETRIES] = {
-                    1.00f, 1.00f, 0.98f, 1.02f, 1.00f,
-                    0.97f, 1.03f, 0.99f, 1.01f, 1.00f,
-                };
-                // Capture more of the disk once a track has given trouble:
-                // every extra revolution is another chance at the sector
-                // that failed, and by then the extra second is worth it.
-                const int revs = (attempt < 2) ? DUMP_REVS : DUMP_REVS_SLOW;
-                if (!track_read(cyl, head, revs, tr, false, bias[attempt])) {
-                    continue;
-                }
-                for (int k = 0; k < tr.nsect; k++) {
-                    const int r = tr.hit[k].r;
-                    if (r < 1 || r > spt || (tr.hit[k].n & 7) != ncode) {
-                        // A sector the disk has but this geometry has no room
-                        // for. A plain DOS disk never has one; noting it is
-                        // what stops an odd disk being written out silently as
-                        // though it were fine.
-                        odd = true;
-                        continue;
-                    }
-                    const uint8_t grade = tr.hit[k].data_ok ? 2 : 1;
-                    if (grade <= got[r - 1]) {
-                        continue;      // already have this one, as good or better
-                    }
-                    memcpy(tbuf + (size_t)(r - 1) * SECT_STRIDE,
-                           tr.data + (size_t)k * SECT_STRIDE, seclen);
-                    got[r - 1] = grade;
-                }
-                int clean = 0;
-                for (int r = 0; r < spt; r++) {
-                    if (got[r] == 2) {
-                        clean++;
-                    }
-                }
-                if (clean == spt) {
-                    break;
-                }
-            }
-
-            int clean = 0, bad = 0, missing = 0;
-            for (int r = 0; r < spt; r++) {
-                if (got[r] == 2) {
-                    clean++;
-                } else if (got[r] == 1) {
-                    bad++;
-                } else {
-                    missing++;
-                }
-                nfd_mark(hdr, cyl * 2 + head, r + 1, got[r], false);
-                // A sector that failed its CRC is still written out: a wrong
-                // byte somewhere beats a hole where the data should be, and
-                // the count below says how much of the image to distrust.
-                if (fwrite(tbuf + (size_t)r * SECT_STRIDE, 1, seclen, f) != seclen) {
-                    ets_printf("gw: write failed - SD card full?\n");
-                    ok = false;
-                    break;
-                }
-            }
-            bad_total += bad;
-            missing_total += missing;
-            if (odd) {
-                odd_tracks++;
-            }
-            clean_total += clean;
-            if (clean == spt) {
-                prog("C%02d H%d   %d/%d sectors", cyl, head, clean_total, want_total);
-            } else {
-                prog("C%02d H%d   %d/%d   (%d bad crc, %d missing)",
-                     cyl, head, clean_total, want_total, bad, missing);
-            }
+extern "C" int gw_live_read_track(int unit, int cyl, int head, int revs,
+                                  gw_sector_t *out, int max_out,
+                                  uint8_t *data, size_t data_cap) {
+    if (!unit_select(unit)) {
+        return -1;
+    }
+    track_out &live = s_live[unit];
+    if (!g->dev || !live.data || !out || !data) {
+        return -1;
+    }
+    // The machine wants this drive: note it, so the keep-alive holds the motor
+    // on through the burst of reads that usually follows, and spin the spindle
+    // up first if it had been left to rest.
+    s_used_us[unit] = esp_timer_get_time();
+    if (!gw_spin_up(unit)) {
+        return -1;
+    }
+    if (!track_read(cyl, head, revs, live, false)) {
+        // Most likely the drive was let go while nothing was reading it. Take
+        // it back and ask once more; a track that is genuinely unreadable will
+        // fail the second time too and be reported as it was before.
+        if (!gw_rearm(unit) || !track_read(cyl, head, revs, live, false)) {
+            return -1;
         }
     }
-
-    if (f) {
-        // Now that every sector's fate is known, put the table back with the
-        // statuses filled in.
-        if (ok && (fseek(f, 0, SEEK_SET) != 0 ||
-                   fwrite(hdr, 1, NFD_HDRSIZE, f) != NFD_HDRSIZE)) {
-            ets_printf("gw: could not rewrite the header\n");
-            ok = false;
+    int n = 0;
+    uint32_t off = 0;
+    for (int k = 0; k < live.nsect && n < max_out; k++) {
+        const sect_hit &h = live.hit[k];
+        const uint32_t len = 128u << (h.n & 7);
+        if (len > SECT_STRIDE || off + len > data_cap) {
+            continue;                   // no room; better to drop than to lie
         }
-        fclose(f);
+        memcpy(data + off, live.data + (size_t)k * SECT_STRIDE, len);
+        out[n].c = h.c;
+        out[n].h = h.h;
+        out[n].r = h.r;
+        out[n].n = h.n;
+        out[n].id_ok = h.id_ok ? 1 : 0;
+        out[n].data_ok = h.data_ok ? 1 : 0;
+        out[n].deleted = h.deleted ? 1 : 0;
+        out[n].fm = h.fm ? 1 : 0;
+        out[n].seen = (uint8_t)((h.seen > 255) ? 255 : h.seen);
+        out[n].len = (uint16_t)len;
+        out[n].off = off;
+        off += len;
+        n++;
     }
-    gw_motor(0, false);
-    gw_cmd2(CMD_DESELECT);
-    free(tr.data);
-    free(tbuf);
-    free(hdr);
+    return n;
+}
 
-    if (ok) {
-        const unsigned total = (unsigned)(NFD_HDRSIZE + (size_t)cyls * 2 * spt * seclen);
-        if (odd_tracks) {
-            // This only handles plain DOS disks. Saying so plainly beats
-            // handing back an image that looks complete: the sectors that did
-            // not fit are simply gone from it.
-            ets_printf("gw: WARNING - %d tracks carry sectors this format cannot hold,\n",
-                       odd_tracks);
-            ets_printf("gw:   so they were left out. This is not a plain DOS disk and\n");
-            ets_printf("gw:   %s is not a faithful copy of it.\n", path);
-        }
-        const char *name = strrchr(path, '/');
-        name = name ? name + 1 : path;
-        if (bad_total || missing_total) {
-            prog("%s  %u bytes, %d bad, %d missing%s", name, total,
-                 bad_total, missing_total, odd_tracks ? "  NOT PLAIN DOS" : "");
-        } else if (odd_tracks) {
-            prog("%s  %u bytes  NOT A PLAIN DOS DISK", name, total);
-        } else {
-            prog("%s  %u bytes, every sector clean", name, total);
+// The serial the device reports, so the menu can name the drive it mounted.
+// Empty when the unit was never opened.
+extern "C" const char *gw_live_serial(int unit) {
+    if (!unit_select(unit) || !g->dev) {
+        return "";
+    }
+    return serial_of(g->addr);
+}
+
+// How many times this drive has been allowed to stop. It only goes up, and a
+// change in it means the disk in the drive could have been swapped since the
+// last read - which is the only moment it can have been.
+extern "C" uint32_t gw_live_rest_count(int unit) {
+    if (unit < 0 || unit >= GW_UNITS) {
+        return 0;
+    }
+    return s_rests[unit];
+}
+
+// The hub socket it is plugged into - a thing you can follow a cable to, which
+// is what the menu wants. 0 when the unit was never opened.
+extern "C" int gw_live_port(int unit) {
+    if (!unit_select(unit) || !g->dev) {
+        return 0;
+    }
+    return (int)port_of(g->addr);
+}
+
+extern "C" int gw_live_count(void) {
+    int n = 0;
+    for (int i = 0; i < GW_UNITS; i++) {
+        if (s_gw[i].addr) {
+            n++;
         }
     }
-    s_prog = nullptr;
-    return ok && bad_total == 0 && missing_total == 0 && odd_tracks == 0;
+    return n;
 }
 
 // ---- entry -----------------------------------------------------------------
@@ -1081,68 +1125,208 @@ extern "C" bool gw_dump_disk(gw_progress_fn progress) {
 // that is unplugged and plugged back in would leave a stale handle behind and
 // every command would fail until the next reboot.
 static void gw_event_cb(const cdc_acm_host_dev_event_data_t *e, void *arg) {
-    (void)arg;
+    gw_dev *d = (gw_dev *)arg;
     if (e->type == CDC_ACM_HOST_ERROR) {
         ets_printf("gw: transfer error %d\n", e->data.error);
     } else if (e->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
-        s_dev = nullptr;
+        if (d) {
+            d->dev = nullptr;
+            d->addr = 0;
+        }
         cdc_acm_host_close(e->data.cdc_hdl);
         ets_printf("gw: Greaseweazle unplugged\n");
     }
 }
 
-extern "C" bool gw_probe(void) {
-    if (s_dev) {
-        return s_freq != 0;                  // already open from an earlier call
+// Every Greaseweazle answers to the same VID and PID, so a second one cannot be
+// opened by asking for that pair again - the driver would hand back the first.
+// The host stack offers each new device to this callback before anything opens
+// it, which is where their USB addresses are collected. Opening then names an
+// address, and the two drives stay apart.
+static uint8_t s_found[GW_UNITS];
+static char    s_serial[GW_UNITS][20];   // as reported by the device itself
+static uint8_t s_port[GW_UNITS];         // which socket on the hub it is in
+static int s_nfound = 0;
+
+// The string descriptor is UTF-16LE and these serials are plain hex, so the
+// low byte of each unit is the whole of it.
+static void serial_text(const usb_str_desc_t *d, char *out, size_t cap) {
+    size_t n = 0;
+    if (d && d->bLength > 2) {
+        const size_t chars = (size_t)(d->bLength - 2) / 2;
+        for (size_t i = 0; i < chars && n + 1 < cap; i++) {
+            const uint16_t c = d->wData[i];
+            out[n++] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+        }
     }
-    if (!s_rx) {
-        s_rx = (uint8_t *)heap_caps_malloc(GW_RX_CAP, MALLOC_CAP_SPIRAM);
-        s_rx_sig = xSemaphoreCreateBinary();
-        if (!s_rx || !s_rx_sig) {
+    out[n] = 0;
+}
+
+// The serial of the device at this USB address, or "?" if it never said.
+static const char *serial_of(uint8_t addr) {
+    for (int i = 0; i < s_nfound; i++) {
+        if (s_found[i] == addr) {
+            return s_serial[i][0] ? s_serial[i] : "?";
+        }
+    }
+    return "?";
+}
+
+// The hub socket the device at this address is plugged into. 0 when the host
+// never said, which is what a device on the root port reports.
+static uint8_t port_of(uint8_t addr) {
+    for (int i = 0; i < s_nfound; i++) {
+        if (s_found[i] == addr) {
+            return s_port[i];
+        }
+    }
+    return 0;
+}
+
+static void gw_new_dev_cb(usb_device_handle_t usb_dev) {
+    const usb_device_desc_t *desc = nullptr;
+    usb_device_info_t info = {};
+    if (usb_host_get_device_descriptor(usb_dev, &desc) != ESP_OK || !desc) {
+        return;
+    }
+    if (desc->idVendor != GW_VID || desc->idProduct != GW_PID) {
+        return;
+    }
+    if (usb_host_device_info(usb_dev, &info) != ESP_OK) {
+        return;
+    }
+    for (int i = 0; i < s_nfound; i++) {
+        if (s_found[i] == info.dev_addr) {
+            return;                       // already known
+        }
+    }
+    if (s_nfound < GW_UNITS) {
+        serial_text(info.str_desc_serial_num, s_serial[s_nfound], sizeof(s_serial[0]));
+        s_found[s_nfound] = info.dev_addr;
+        s_port[s_nfound] = info.parent.port_num;
+        ets_printf("gw: Greaseweazle on hub port %u (USB address %u, serial %s)\n",
+                   info.parent.port_num, info.dev_addr,
+                   s_serial[s_nfound][0] ? s_serial[s_nfound] : "?");
+        s_nfound++;
+    }
+}
+
+static bool driver_up(void) {
+    static bool installed = false;
+    if (installed) {
+        return true;
+    }
+    const cdc_acm_host_driver_config_t drv = {
+        .driver_task_stack_size = 4096,
+        .driver_task_priority = 5,
+        .xCoreID = 0,
+        .new_dev_cb = gw_new_dev_cb,
+    };
+    const esp_err_t e = cdc_acm_host_install(&drv);
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+        ets_printf("gw: cdc_acm_host_install failed: %s\n", esp_err_to_name(e));
+        return false;
+    }
+    installed = true;
+    // The callback only fires for devices that arrive after this point, so
+    // anything already plugged in has to be found the other way: open with any
+    // address, note what turned up, and keep it.
+    return true;
+}
+
+// Bring up one unit. Returns false when there is no Greaseweazle for it, which
+// is the normal case for unit 1 on a one-drive setup.
+static bool gw_probe_unit(int unit) {
+    if (!unit_select(unit)) {
+        return false;
+    }
+    if (g->dev) {
+        return g->freq != 0;              // already open
+    }
+    if (!g->rx) {
+        g->rx = (uint8_t *)heap_caps_malloc(GW_RX_CAP, MALLOC_CAP_SPIRAM);
+        g->rx_sig = xSemaphoreCreateBinary();
+        if (!g->rx || !g->rx_sig) {
             ets_printf("gw: out of memory\n");
             return false;
         }
     }
-    static bool installed = false;
-    if (!installed) {
-        const cdc_acm_host_driver_config_t drv = {
-            .driver_task_stack_size = 4096,
-            .driver_task_priority = 5,
-            .xCoreID = 0,
-            .new_dev_cb = nullptr,
-        };
-        const esp_err_t e = cdc_acm_host_install(&drv);
-        if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
-            ets_printf("gw: cdc_acm_host_install failed: %s\n", esp_err_to_name(e));
-            return false;
-        }
-        installed = true;
-    }
-
-    cdc_acm_host_device_config_t cfg = {};
-    cfg.connection_timeout_ms = 1000;
-    cfg.out_buffer_size = 512;
-    cfg.in_buffer_size = 4096;       // fewer, larger callbacks during a read
-    cfg.event_cb = gw_event_cb;
-    cfg.data_cb = rx_cb;
-    cfg.user_arg = nullptr;
-
-    const esp_err_t e = cdc_acm_host_open(GW_VID, GW_PID, 0, &cfg, &s_dev);
-    if (e != ESP_OK) {
-        ets_printf("gw: no Greaseweazle on the USB port (%04x:%04x)\n", GW_VID, GW_PID);
-        s_dev = nullptr;
+    if (!driver_up()) {
         return false;
     }
-    ets_printf("gw: Greaseweazle found\n");
+
+    // Wait for the device list before choosing from it.
+    //
+    // new_dev_cb runs on the host stack's own task, and it was firing DURING
+    // the open below rather than before it - so the list was still empty when
+    // it was consulted, unit 0 opened "whichever" and never learned which one
+    // it had taken. With one drive that only made the log say 255; with two it
+    // would have sent unit 1 to open the device unit 0 was already using.
+    for (int w = 0; w < 40 && s_nfound < unit + 1; w++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (s_nfound < unit + 1) {
+        if (unit > 0) {
+            return false;             // no second Greaseweazle; normal setup
+        }
+        ets_printf("gw: no Greaseweazle on the USB port (%04x:%04x)\n", GW_VID, GW_PID);
+        return false;
+    }
+
+    cdc_acm_host_open_config_t cfg = {};
+    cfg.vid = GW_VID;
+    cfg.pid = GW_PID;
+    cfg.interface_idx = 0;
+    // Name the device. Every Greaseweazle shares a VID and PID, so asking for
+    // that pair again would hand back the one another unit already holds; the
+    // USB address is the only thing that tells them apart.
+    cfg.dev_addr = 0;
+    for (int i = 0; i < s_nfound; i++) {
+        bool taken = false;
+        for (int u = 0; u < GW_UNITS; u++) {
+            if (s_gw[u].dev && s_gw[u].addr == s_found[i]) {
+                taken = true;
+                break;
+            }
+        }
+        if (!taken) {
+            cfg.dev_addr = s_found[i];
+            break;
+        }
+    }
+    if (!cfg.dev_addr) {
+        return false;                     // every one found is already in use
+    }
+    cfg.connection_timeout_ms = 1000;
+    cfg.out_buffer_size = 512;
+    cfg.in_buffer_size = 4096;        // fewer, larger callbacks during a read
+    cfg.event_cb = gw_event_cb;
+    cfg.data_cb = rx_cb;
+    cfg.user_arg = g;
+
+    if (cdc_acm_host_open(&cfg, &g->dev) != ESP_OK) {
+        if (unit == 0) {
+            ets_printf("gw: no Greaseweazle on the USB port (%04x:%04x)\n", GW_VID, GW_PID);
+        }
+        g->dev = nullptr;
+        return false;
+    }
+    g->addr = cfg.dev_addr;   // so the next unit does not open it again
+    ets_printf("gw: unit %d opened, USB address %u\n", unit, g->addr);
 
     // The device ignores the line coding, but some hosts will not open the pipe
     // without one being set.
     cdc_acm_line_coding_t lc = {115200, 0, 0, 8};
-    cdc_acm_host_line_coding_set(s_dev, &lc);
+    cdc_acm_host_line_coding_set(g->dev, &lc);
 
     const bool ok = gw_get_info();
     if (!ok) {
-        ets_printf("gw: the device did not answer GetInfo\n");
+        ets_printf("gw: unit %d did not answer GetInfo\n", unit);
     }
     return ok;
+}
+
+// Called once at boot, purely to say what is plugged in.
+extern "C" bool gw_probe(void) {
+    return gw_probe_unit(0);
 }
