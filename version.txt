@@ -1,6 +1,13 @@
 np2 TAB5
 
 
+1.1.1   2026-09-07
+
+  - Changed: opening the menu now tells the machine the disk in a GreaseWeazle
+             drive may have been swapped, so ejecting and re-mounting is no
+             longer needed.
+
+
 1.1.0   2026-09-06
 
   - fixed: exchanged with a new built-in compatible BIOS.

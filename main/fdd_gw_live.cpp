@@ -740,6 +740,27 @@ static void door_opened(int drive) {
     ets_printf("gwfdd%d: telling the machine the disk was changed\n", drive + 1);
 }
 
+// The disk menu is opening, and a disk can only be swapped while the machine
+// is stopped in front of it. So the cached tracks go and the guest is told the
+// door opened, whether or not anything is actually exchanged - a re-read of the
+// same disk costs a second and tells the guest nothing it did not know, while
+// missing a real swap leaves it reading a disk that is no longer in the drive.
+extern "C" void fdd_gw_live_menu_opened(void) {
+    for (int d = 0; d < GW_DRIVES; d++) {
+        live_drv *p = drv_of(d);
+
+        if (!p || !p->mounted) {
+            continue;
+        }
+        flush_tracks(p);
+        p->rests = gw_live_rest_count(d);
+        s_seen_rest[d] = p->rests;
+        door_opened(d);
+        ets_printf("gwfdd%d: menu opened - the disk in the drive will be read again\n",
+                   d + 1);
+    }
+}
+
 // Called once per frame from the emulator's own loop, which is where disk
 // access happens too - so nothing here can land in the middle of a transfer.
 extern "C" void fdd_gw_live_tick(void) {

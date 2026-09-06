@@ -62,6 +62,7 @@ void usb_msc_dump_log(void);       // usb_msc.cpp: print /sd/USBMODE.LOG
 void gw_live_keepalive(void);       // gw_mode.cpp: keep a mounted drive turning
 void fdd_gw_live_tick(void);        // fdd_gw_live.cpp: report a swapped disk
 void fdd_gw_live_started(void);     // ...and when to start doing so
+void fdd_gw_live_menu_opened(void); // ...and that opening the menu means a swap
 void panel_tab5_blank_early(void);  // panel_tab5.cpp: kill the backlight and the panel rail
 void usb_msc_restore_phy_map(void);  // usb_msc.cpp: undo USB Mode's PHY swap
 void tab5_backlight_set(int percent);   // panel_tab5.cpp
@@ -614,6 +615,9 @@ static void emu_task(void *arg) {
         // Disk swap menu (Pause/Break): modal — pccore_exec pauses inside.
         if (g_menu_req) {
             g_menu_req = 0;
+            // A disk can only be swapped while the menu holds the machine
+            // still, so opening it is taken as having swapped one.
+            fdd_gw_live_menu_opened();
             while (lcd_blit_busy()) vTaskDelay(1);  // in-flight blit must finish before the menu draws
             menu_disk_run();
             if (fb) lcd_blit(fb);   // menu drew straight to the LCD: restore the emulated screen

@@ -164,7 +164,7 @@ from the menu.
 - Up to two GreaseWeazles can be connected. For that, use a **self-powered USB
   hub**.
 - **Power the drives separately.** A 5-inch drive needs its own supply.
-- After changing a disk, eject it from the menu once and mount it again.
+- After changing a disk, open the menu once and the machine picks up the change.
 - **Copy-protected disks are not supported.**
 
 Set the jumpers on a drive connected to a GreaseWeazle as below. Where there is
