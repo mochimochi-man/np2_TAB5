@@ -24,10 +24,18 @@ The flash mode is qio and the bootloader must be written with it: the app alone
 at 0x10000 will run, but from a dio-mode bootloader, and the emulator is
 measurably slower for it.
 
---- a clean install ----------------------------------------------------------
+--- settings, and which way of flashing keeps them ----------------------------
 
 Settings (disk selection, CPU clock, backlight, volume, Bluetooth pairings) live
-in NVS and survive a reflash. To start from nothing:
+in NVS at 0x9000.
+
+The four parts keep them: none of them lands there. The merged image does not -
+it is one contiguous run from 0x0, so the gap between the partition table and
+the OTA data is written as well, and NVS is inside that gap. Writing
+np2_TAB5_0x0.bin clears the settings every time, and that includes installing
+through M5Burner.
+
+To wipe everything deliberately:
 
   esptool --chip esp32p4 -p <PORT> erase-flash
 
