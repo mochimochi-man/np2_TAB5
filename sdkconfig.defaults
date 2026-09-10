@@ -172,3 +172,13 @@ CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
 # build produced a measurably slower emulator from identical sources.
 CONFIG_FATFS_USE_FASTSEEK=y
 CONFIG_FATFS_FAST_SEEK_BUFFER_SIZE=64
+
+# A panic in USB Mode cannot be seen: the console has been handed to the
+# device stack by then. Writing the dump to flash means the next crash is
+# captured wherever it happens, and read back afterwards - rather than
+# reproduced over and over to narrow it by hand.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64
+CONFIG_ESP_COREDUMP_STACK_SIZE=1792

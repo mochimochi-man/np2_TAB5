@@ -40,11 +40,13 @@ Saves the screen to the microSD card as a PNG.
 
 Presents the Tab5's microSD card to a PC as a drive. The transfer rate is about
 0.6MB/s, which is very slow.
+Bluetooth is off while this mode runs; tap the screen to leave it.
 
 ### Disk Image Reader mode
 
 Presents the currently mounted hard disk image to a PC as a drive. The transfer
 rate is about 0.6MB/s, which is very slow.
+Bluetooth is off while this mode runs; tap the screen to leave it.
 
 ### GreaseWeazle mode
 

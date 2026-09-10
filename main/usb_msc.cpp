@@ -48,6 +48,8 @@
 #include "esp_system.h"
 #include "esp_log.h"
 #include "soc/lp_system_struct.h"
+#include "esp_lcd_touch.h"
+#include "bsp/touch.h"
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "tusb.h"
@@ -162,8 +164,6 @@ extern "C" void panel_tab5_blank_early(void);
 // while USB Mode's device stack is on the full-speed controller and the USB-C
 // socket. They share nothing.
 extern "C" void usb_kbd_init(void);
-extern "C" void bt_hid_init(void);   // bt_hid.cpp: BLE HID host
-static void bt_late_task(void *arg);   // Bluetooth, off the critical path
 extern "C" bool usb_kbd_pop(uint8_t *nk, uint8_t *dn);
 
 #define COL_WHITE 0xFFFF
@@ -430,6 +430,42 @@ extern "C" bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool
     return true;
 }
 
+static void stage(uint32_t n);   // defined below, next to the record it writes
+
+// A bump allocator over the borrowed stack. Aligned to 64 bytes because the
+// SDMMC driver wants that of a DMA buffer, and falling back to the heap so
+// that a region too small to hold everything is a slower mode rather than a
+// broken one.
+static uint8_t *s_scratch;
+static size_t   s_scratch_left;
+
+static void *scratch_take(size_t n) {
+    const size_t want = (n + 63) & ~(size_t)63;
+
+    if (s_scratch && s_scratch_left >= want) {
+        uint8_t *p = s_scratch;
+        s_scratch += want;
+        s_scratch_left -= want;
+        return p;
+    }
+    return heap_caps_aligned_alloc(64, n, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+}
+
+// Only the last block can be handed back, which is all this needs: the cache
+// is claimed and released as a set while its size is being chosen.
+static void scratch_give(void *p, size_t n) {
+    const size_t want = (n + 63) & ~(size_t)63;
+
+    if (!p) {
+        return;
+    }
+    if ((uint8_t *)p + want == s_scratch) {
+        s_scratch = (uint8_t *)p;
+        s_scratch_left += want;
+        return;
+    }
+    free(p);
+}
 extern "C" int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize) {
     (void)lun;
     if (s_mode == USB_MODE_IMAGE) {
@@ -437,13 +473,33 @@ extern "C" int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
         if (!bs || (offset % bs) != 0) {
             return -1;
         }
+        // How far the first read from the host got. A reset leaves the last of
+        // these behind, which is the only way to see inside a mode that has
+        // taken the console away.
+        static bool first_image_read = true;
+        const bool mark = first_image_read;
+        if (mark) {
+            first_image_read = false;
+            stage(16);
+        }
         xSemaphoreTake(s_mux, portMAX_DELAY);
         const int32_t r = usb_image_read(lba + offset / bs, buffer, bufsize);
         xSemaphoreGive(s_mux);
+        if (mark) {
+            stage(17);
+        }
         return r;
     }
     if (!s_card || (offset % SECTOR_SIZE) != 0 || (bufsize % SECTOR_SIZE) != 0) {
         return -1;
+    }
+    // Where the first read from the host gets to. A watchdog reset leaves the
+    // last of these behind, which is the only way to see inside a mode that has
+    // taken the console away.
+    static bool first_read = true;
+    const bool mark = first_read;
+    if (mark) {
+        stage(13);
     }
     const uint32_t start = lba + offset / SECTOR_SIZE;
     const uint32_t count = bufsize / SECTOR_SIZE;
@@ -453,6 +509,10 @@ extern "C" int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
     // flight would be faster, but reads barely interleave with a bulk copy and
     // getting it wrong hands the host stale data.
     barrier_locked();
+    if (mark) {
+        stage(14);
+        first_read = false;
+    }
 
     esp_err_t err;
     // The SDMMC driver wants a DMA-capable, 64-byte-aligned buffer; TinyUSB's
@@ -585,6 +645,7 @@ static char const *s_desc_strings[] = {
     "SD Card Reader",            // 5: MSC interface
 };
 
+
 // ---- CDC: console + the reset that makes reflashing possible --------------
 static volatile uint32_t s_cdc_baud = 0;
 
@@ -614,6 +675,7 @@ extern "C" void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
         return;
     }
     if (s_cdc_baud == 1200) {
+        stage(93);      // so the record says this was asked for, not a crash
         flush_cache();  // do not strand a half-written cache in RAM
         panel_tab5_blank_early();
         esp_restart();
@@ -691,6 +753,23 @@ static void stage(uint32_t n) {
     s_stage_dma = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
 }
 
+// Why the chip started this time. A deliberate esp_restart() and a panic
+// both leave USB Mode looking the same in the stage record.
+static const char *reset_name(void) {
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "power-on";
+    case ESP_RST_SW:       return "software restart";
+    case ESP_RST_PANIC:    return "PANIC";
+    case ESP_RST_INT_WDT:  return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT:      return "other watchdog";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_EXT:      return "external reset";
+    case ESP_RST_USB:      return "USB peripheral reset";
+    default:               return "?";
+    }
+}
+
 static const char *stage_name(uint32_t n) {
     switch (n) {
     case 1:  return "entered USB Mode";
@@ -702,44 +781,29 @@ static const char *stage_name(uint32_t n) {
     case 7:  return "PHY taken";
     case 8:  return "device stack started";
     case 9:  return "tasks running";
-    case 10: return "Bluetooth started";
+    case 10: return "ready";
     case 11: return "waiting for a host";
     case 12: return "host enumerated - working";
     case 90: return "gave up: no backing store";
     case 91: return "gave up: device stack would not start";
     case 92: return "gave up: no host after 25s";
+    case 93: return "1200-baud touch - the host asked for a restart";
+    case 13: return "first host read - entered";
+    case 14: return "first host read - past the write barrier";
+    case 15: return "first host read - sectors handed over";
+    case 16: return "first host read - image mode, entered";
+    case 17: return "first host read - image mode, returned";
     default: return "?";
     }
 }
 
-// Called from the ordinary boot path, after the card is mounted. Says what the
-// last USB Mode attempt managed, then forgets it.
+// Called from the ordinary boot path. Says what the last USB Mode attempt
+// managed and why it ended, then forgets it.
 //
-// The answer goes to the SD card as well as the console, and the card is the
-// copy that matters: opening the serial port resets this chip (rst:0x17,
-// CHIP_USB_UART_RESET), and that reset clears RTC memory - so simply connecting
-// to read the result destroys it. Writing a file first makes the record survive
-// whatever happens afterwards.
-// Print whatever attempts the card has recorded. Opening the serial port resets
-// this chip and wipes RTC memory, so the file is the only copy that survives
-// being read - and printing it at boot is what makes it readable without
-// pulling the card out.
-extern "C" void usb_msc_dump_log(void) {
-    FILE *f = fopen("/sd/USBMODE.LOG", "r");
-    if (!f) {
-        return;
-    }
-    char line[160];
-    int n = 0;
-    ets_printf("usb_msc: --- USBMODE.LOG ---\n");
-    while (fgets(line, sizeof(line), f)) {
-        ets_printf("usb_msc: %s", line);
-        n++;
-    }
-    fclose(f);
-    ets_printf("usb_msc: --- %d entries ---\n", n);
-}
-
+// Read it from the screen or from a terminal that was already attached:
+// opening the serial port resets this chip (rst:0x17, CHIP_USB_UART_RESET),
+// and that reset clears RTC memory, so connecting in order to read the result
+// is what destroys it.
 extern "C" void usb_msc_report_last(void) {
     if (s_stage_magic != USB_STAGE_MAGIC) {
         return;
@@ -748,15 +812,8 @@ extern "C" void usb_msc_report_last(void) {
     const unsigned st = (unsigned)s_stage;
     const unsigned fr = (unsigned)s_stage_free;
     const unsigned dm = (unsigned)s_stage_dma;
-    ets_printf("usb_msc: last attempt reached stage %u (%s), internal free %u, largest dma %u\n",
-               st, stage_name(st), fr, dm);
-
-    FILE *f = fopen("/sd/USBMODE.LOG", "a");
-    if (f) {
-        fprintf(f, "stage %u (%s)  internal free %u  largest dma %u\n",
-                st, stage_name(st), fr, dm);
-        fclose(f);
-    }
+    ets_printf("usb_msc: last attempt reached stage %u (%s), internal free %u, largest dma %u, came back by: %s\n",
+               st, stage_name(st), fr, dm, reset_name());
 }
 
 // ---- screen --------------------------------------------------------------
@@ -829,20 +886,11 @@ static void draw_screen(void) {
         }
     }
 
-    lcd_menu_line(9,  MODE_INDENT "ESC on the keyboard returns to the emulator.",
+    lcd_menu_line(9,  MODE_INDENT "Tap the screen - or ESC on a USB keyboard - to return.",
                   COL_WHITE, COL_BLACK);
     lcd_menu_line(10, MODE_INDENT "Eject the drive on the PC first.",
                   COL_WHITE, COL_BLACK);
     lcd_menu_flush();
-}
-
-// Bluetooth, off the critical path. If it never returns, only this task is
-// stuck; USB Mode carries on serving the card.
-static void bt_late_task(void *arg) {
-    (void)arg;
-    bt_hid_init();
-    stage(10);
-    vTaskDelete(NULL);
 }
 
 // ---- entry ---------------------------------------------------------------
@@ -860,9 +908,49 @@ static void tusb_task(void *arg) {
 
 // Any key press is read here, not in the main loop, so that leaving USB Mode
 // never depends on what the rest of it is doing.
+// The touch panel, opened for one purpose: to notice a tap. The controller
+// shares the display rail, which is already up by the time this runs.
+static esp_lcd_touch_handle_t s_tp;
+
+static void touch_escape_init(void) {
+    if (bsp_touch_new(nullptr, &s_tp) != ESP_OK) {
+        s_tp = nullptr;
+        usb_msc_log("usb_msc: no touch panel - ESC on a USB keyboard then\n");
+    }
+}
+
+// True once, on the lift. A finger already down when this mode starts, or
+// resting on the glass while the tablet is set down, is not an instruction.
+static bool touch_released(void) {
+    static bool was_down;
+    uint16_t x[2], y[2];
+    uint8_t n = 0;
+
+    if (!s_tp) {
+        return false;
+    }
+    esp_lcd_touch_read_data(s_tp);
+    const bool down = esp_lcd_touch_get_coordinates(s_tp, x, y, nullptr, &n, 2) && n > 0;
+    const bool lifted = was_down && !down;
+    was_down = down;
+    return lifted;
+}
+
 static void escape_task(void *arg) {
     (void)arg;
+    touch_escape_init();
     for (;;) {
+        if (touch_released()) {
+            printf("usb_msc: screen tapped, returning to the emulator\n");
+            if (s_mode == USB_MODE_IMAGE) {
+                usb_image_flush();
+            } else {
+                flush_cache();
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+            panel_tab5_blank_early();
+            esp_restart();
+        }
         uint8_t nk, dn;
         while (usb_kbd_pop(&nk, &dn)) {
             printf("usb_msc: key %02x %s\n", nk, dn ? "down" : "up");
@@ -903,9 +991,23 @@ extern "C" void usb_msc_run(int mode) {
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
 
     s_mux = xSemaphoreCreateMutex();
+    // The emulator's stack, idle for the whole of USB Mode. Buffers come out
+    // of here rather than the heap so the USB stacks keep what they need.
+    // See emu_stack_borrow() in main.cpp for why this is safe.
+    {
+        extern void *emu_stack_borrow(size_t *len);
+        size_t n = 0;
+        s_scratch = (uint8_t *)emu_stack_borrow(&n);
+        s_scratch_left = n;
+        // 64-byte alignment is what the SDMMC driver wants of a DMA buffer.
+        const size_t pad = (64 - ((uintptr_t)s_scratch & 63)) & 63;
+        s_scratch += pad;
+        s_scratch_left -= pad;
+    }
+
     s_wr_queue = xQueueCreate(CACHE_BUFS, sizeof(wrjob_t));
     s_free_bufs = xSemaphoreCreateCounting(CACHE_BUFS, CACHE_BUFS);
-    s_bounce = (uint8_t *)heap_caps_aligned_alloc(64, CFG_TUD_MSC_EP_BUFSIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    s_bounce = (uint8_t *)scratch_take(CFG_TUD_MSC_EP_BUFSIZE);
     if (!s_mux || !s_wr_queue || !s_free_bufs || !s_bounce) {
         printf("usb_msc: cannot allocate the basics\n");
         lcd_menu_clear();
@@ -925,14 +1027,14 @@ extern "C" void usb_msc_run(int mode) {
     // transfer) still pipelines, just with no margin.
     for (uint32_t want = 16; want >= 8; want /= 2) {
         for (int i = 0; i < CACHE_BUFS; i++) {
-            s_cache[i] = (uint8_t *)heap_caps_aligned_alloc(64, want * SECTOR_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+            s_cache[i] = (uint8_t *)scratch_take(want * SECTOR_SIZE);
         }
         if (s_cache[0] && s_cache[1]) {
             s_cache_sectors = want;
             break;
         }
         for (int i = 0; i < CACHE_BUFS; i++) {
-            free(s_cache[i]);
+            scratch_give(s_cache[i], want * SECTOR_SIZE);
             s_cache[i] = nullptr;
         }
     }
@@ -976,16 +1078,25 @@ extern "C" void usb_msc_run(int mode) {
     stage(4);
     draw_screen();
 
-    // A way out that does not need the PC, brought up before the device stack:
-    // the virtual serial port this mode offers is the only other one, and if
-    // the host will not talk to it there is otherwise nothing left but pulling
-    // the power. The USB-A socket is the high-speed controller with its own
-    // UTMI PHY, so it shares nothing with the device side.
-    printf("usb_msc: internal free before kbd=%u largest_dma=%u\n",
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
-    extern void (*g_kbd_log)(const char *fmt, ...);   // usb_kbd.cpp
-    g_kbd_log = usb_msc_log;
+    // A way out that does not need the PC: ESC on a keyboard in the USB-A socket
+    // returns to the emulator. It goes up before the device stack and stays
+    // there - putting it after was tried, and the mode began panicking the
+    // moment a host enumerated. ESP-IDF keeps one USB PHY driver and this code
+    // cannot assume the host side may be installed while the device side owns a
+    // PHY.
+    //
+    // What it costs is worth knowing: the host stack grew when hub support was
+    // compiled in for the GreaseWeazle, and USB Mode pays for that without
+    // using it. This is the figure to decide on if the keyboard host ever has
+    // to be skipped the way Bluetooth already is.
+    usb_msc_log("usb_msc: internal free before kbd=%u largest_dma=%u\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(
+                    MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    {
+        extern void (*g_kbd_log)(const char *fmt, ...);   // usb_kbd.cpp
+        g_kbd_log = usb_msc_log;
+    }
     usb_kbd_init();
     stage(5);
 
@@ -1095,38 +1206,25 @@ extern "C" void usb_msc_run(int mode) {
     // starve it - the keyboard would stop being read, which is the one thing
     // that must not happen in a mode that has taken the console away.
     xTaskCreate(escape_task, "usbesc", 3072, nullptr, 6, nullptr);
+
     stage(9);
 
-    // Bluetooth on its own task, and only if there is room for it.
+    // No Bluetooth in USB Mode. A core dump taken from a board that rebooted
+    // the moment a PC opened the drive named BTU_TASK - Bluedroid's upper task
+    // - with a null program counter and a corrupt stack.
     //
-    // This is what was taking the mode down. Moving it after the device stack
-    // stopped it starving tusb, but it still ran on this thread and still had
-    // to start: with 66KB of internal RAM free here against 170KB on an
-    // ordinary boot, bringing up esp_hosted and Bluedroid either fails or hangs,
-    // and hanging here meant the main loop below never ran at all. The recorded
-    // evidence was a mode that reached "tasks running" and no further.
+    // It used to be started only when 110KB of internal RAM was free, and it
+    // never was, so it was skipped and nobody noticed. Once this mode was given
+    // the emulator's idle stack to work in, the figure passed the guard,
+    // Bluetooth started, and it took the mode down with it. Memory was not what
+    // made it safe.
     //
-    // So: a separate task, so that whatever happens in there cannot stop this
-    // one, and a memory check first, because starting it with nothing to spare
-    // is how it fails in the first place. Bluetooth is a convenience here - it
-    // only exists so ESC works on a BLE keyboard - and it is not worth the mode
-    // it is riding on.
-    {
-        const unsigned freeb = (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        const unsigned dma = (unsigned)heap_caps_get_largest_free_block(
-                                 MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        usb_msc_log("usb_msc: internal free before BT=%u largest_dma=%u\n", freeb, dma);
-        // 110KB is comfortably above the 66KB that failed and below the 170KB an
-        // ordinary boot has. A mode that works without Bluetooth beats one that
-        // does not work at all.
-        if (freeb < 110 * 1024) {
-            usb_msc_log("usb_msc: too little memory for Bluetooth - skipping it.\n"
-                        "usb_msc: ESC on a USB keyboard still returns to the emulator.\n");
-            stage(10);
-        } else {
-            xTaskCreate(bt_late_task, "usbbt", 4096, nullptr, 3, nullptr);
-        }
-    }
+    // What it was for was ESC on a BLE keyboard. Tapping the screen does the
+    // same job and needs nothing plugged in; ESC on a USB keyboard still works
+    // too. Both are read by the same task, which does nothing else.
+    usb_msc_log("usb_msc: Bluetooth is not started here - it crashes this mode.\n"
+                "usb_msc: tap the screen, or press ESC on a USB keyboard, to return.\n");
+    stage(10);
 
     printf("usb_msc: ready\n");
     // If no host ever enumerates, come back. USB Mode has just moved the

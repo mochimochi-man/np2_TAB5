@@ -58,7 +58,6 @@ void usb_kbd_init(void);           // usb_kbd.cpp: USB HID keyboard host
 // through the companion ESP32-C6 over esp-hosted — a later phase.
 int  usb_msc_boot_flag_take(void); // usb_msc.cpp: read+clear the USB Mode request (0 = none)
 void usb_msc_report_last(void);    // usb_msc.cpp: how far the last USB Mode attempt got
-void usb_msc_dump_log(void);       // usb_msc.cpp: print /sd/USBMODE.LOG
 void gw_live_keepalive(void);       // gw_mode.cpp: keep a mounted drive turning
 void fdd_gw_live_tick(void);        // fdd_gw_live.cpp: report a swapped disk
 void fdd_gw_live_started(void);     // ...and when to start doing so
@@ -220,6 +219,19 @@ extern "C" bool sd_mount(void);
 // a 14KB margin and hands 20KB back to the heap.
 #define EMU_STACK_WORDS (36 * 1024 / sizeof(StackType_t))
 static StackType_t  emu_stack[EMU_STACK_WORDS];
+
+// USB Mode runs instead of the emulator and leaves only by rebooting, so
+// this stack is 36KB of internal RAM that is reserved and idle for as long
+// as that mode lasts. It is the largest such block in the firmware, and USB
+// Mode was running out of exactly this kind of memory, so it may borrow it.
+// Nothing else may: the emulator task is created with it the moment the
+// ordinary boot path reaches the end.
+extern "C" void *emu_stack_borrow(size_t *len) {
+    if (len) {
+        *len = sizeof(emu_stack);
+    }
+    return emu_stack;
+}
 static StaticTask_t emu_tcb;
 
 extern "C" void app_main(void) {
@@ -296,7 +308,6 @@ static void emu_task(void *arg) {
     // is the point: reading this over the serial port resets the chip, and the
     // reset clears the RTC memory the record lives in.
     usb_msc_report_last();
-    usb_msc_dump_log();
 
     // --- USB HID keyboard/mouse, on the USB-A port ---
     // On the ESP32-S3 forks this had to stay off: there is one USB peripheral

@@ -1,6 +1,13 @@
 np2 TAB5
 
 
+1.1.2   2026-09-10
+
+  - Fixed: SD Card Reader Mode and Disk Image Reader Mode are steadier -
+           Bluetooth is no longer started while either mode is running.
+           Tap the screen to leave them.
+
+
 1.1.1   2026-09-07
 
   - Changed: opening the menu now tells the machine the disk in a GreaseWeazle
