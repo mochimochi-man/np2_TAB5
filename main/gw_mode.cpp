@@ -94,6 +94,7 @@ struct gw_dev {
     size_t            rx_pos;             // bytes consumed by the reader
     volatile bool     rx_ovf;
     SemaphoreHandle_t rx_sig;
+    SemaphoreHandle_t rx_lock;            // held while rx_len is changed
     uint32_t          freq;               // sample ticks per second
     uint8_t           addr;               // USB device address, 0 = not found
 };
@@ -106,15 +107,23 @@ static gw_dev s_gw[GW_UNITS];
 static gw_dev *g = &s_gw[0];
 
 // ---- transport -------------------------------------------------------------
-// Append-only: the callback is the sole writer and only ever advances g->rx_len,
-// the reader is the sole reader and only ever advances g->rx_pos behind it. That
-// removes the need for a lock on the data itself, which matters because these
-// buffers arrive a thousand times a second during a track read.
+// Append-only: the callback fills the buffer and advances rx_len behind the
+// data it has already copied, the reader advances rx_pos behind that. Reading
+// needs no lock - the writer only ever grows rx_len, and never publishes bytes
+// it has not written yet.
+//
+// Rewinding does. rx_reset() puts rx_len back to zero from the emulator task
+// while this callback runs in the CDC-ACM driver's, and both are a
+// read-modify-write of the same word. Losing that race leaves rx_len holding
+// the callback's total with rx_pos back at zero, so the next acknowledgement
+// is read from the middle of whatever the buffer still held. rx_lock is held
+// across the copy on this side and across the rewind on the other.
 static bool rx_cb(const uint8_t *data, size_t len, void *arg) {
     // Whose data this is comes from the callback argument, not from the
     // current unit: with two devices open, the other one's driver task can be
     // delivering while this one is being read.
     gw_dev *d = (gw_dev *)arg;
+    xSemaphoreTake(d->rx_lock, portMAX_DELAY);
     const size_t room = GW_RX_CAP - d->rx_len;
     if (len > room) {
         d->rx_ovf = true;
@@ -122,15 +131,57 @@ static bool rx_cb(const uint8_t *data, size_t len, void *arg) {
     }
     memcpy(d->rx + d->rx_len, data, len);
     d->rx_len = d->rx_len + len;
+    xSemaphoreGive(d->rx_lock);
     xSemaphoreGive(d->rx_sig);
     return true;   // we took the buffer
 }
 
 static void rx_reset(void) {
+    xSemaphoreTake(g->rx_lock, portMAX_DELAY);
     g->rx_len = 0;
     g->rx_pos = 0;
     g->rx_ovf = false;
+    xSemaphoreGive(g->rx_lock);
     xSemaphoreTake(g->rx_sig, 0);
+}
+
+// Wait for the device to stop talking, throwing away whatever it says.
+//
+// READFLUX has no abort: it streams until it has given the revolutions it was
+// asked for. Giving up on the terminator therefore leaves the rest of the
+// stream to arrive in the next command's answer, and every command after that
+// reads someone else's. Quiet is the signal that it has finished - flux comes
+// in a steady rush, a callback every few tens of milliseconds, so a fifth of a
+// second of silence is not a pause in it.
+//
+// The rewind inside the loop is what keeps a stream longer than the buffer
+// from filling it and going quiet for the wrong reason.
+static void rx_drain(int quiet_ms, int cap_ms) {
+    const TickType_t hard = xTaskGetTickCount() + pdMS_TO_TICKS(cap_ms);
+    TickType_t last = xTaskGetTickCount();
+    size_t seen = g->rx_len;
+
+    for (;;) {
+        xSemaphoreTake(g->rx_sig, pdMS_TO_TICKS(20));
+        const TickType_t now = xTaskGetTickCount();
+        const size_t have = g->rx_len;
+
+        if (have != seen) {
+            last = now;
+            seen = have;
+            if (have > GW_RX_CAP / 2) {
+                rx_reset();
+                seen = 0;
+            }
+        } else if ((now - last) >= pdMS_TO_TICKS(quiet_ms)) {
+            break;
+        }
+        if (now >= hard) {
+            ets_printf("gw: the device is still streaming after %d ms\n", cap_ms);
+            break;
+        }
+    }
+    rx_reset();
 }
 
 // Wait for `want` more bytes and take them. The device answers a command within
@@ -175,10 +226,46 @@ static bool rx_wait_zero(size_t *end, int timeout_ms) {
     }
 }
 
+// How many stale answers to step over before giving up, and how long to wait
+// for each. One is the usual case - a single command timed out - and the cap is
+// there so a device sending something that is not an answer at all cannot hold
+// the emulator up.
+#define GW_RESYNC_MAX 8
+#define GW_RESYNC_MS  200
+
+// Step forward until the echoed opcode is the one that was just sent.
+//
+// A command whose answer arrived too late is not lost: the device answers
+// everything it is sent, in order, so that answer turns up in the next
+// command's slot and every read after it is one command behind. Two bytes per
+// answer means the stream can be walked back into step, and what is walked over
+// belongs to commands that have already failed and been reported.
+//
+// Without this the link stays crossed until the board is power-cycled, which is
+// what the log showed: "got 02, sent 0e" followed by "got 0e, sent 02", over
+// and over, from one seek that took longer than a second.
+static bool rx_resync(uint8_t want, uint8_t *ack) {
+    for (int stale = 1; stale <= GW_RESYNC_MAX; stale++) {
+        if (!rx_take(ack, 2, GW_RESYNC_MS)) {
+            return false;
+        }
+        if (ack[0] == want) {
+            ets_printf("gw: back in step, %d stale repl%s skipped\n",
+                       stale, stale == 1 ? "y" : "ies");
+            return true;
+        }
+    }
+    return false;
+}
+
 // Send a command and check the acknowledgement. Every Greaseweazle command
 // answers with its own opcode and a status byte, so a mismatched opcode means
 // the stream has lost sync rather than that the command failed.
 static bool gw_cmd(const uint8_t *cmd, size_t len, int timeout_ms = 1000) {
+    // Anything sitting in the buffer now is the tail of an exchange that has
+    // already been given up on. Dropping it before sending saves a step of the
+    // resync below; it cannot prevent the crossing, because the answer that
+    // causes it has not arrived yet.
     rx_reset();
     if (cdc_acm_host_data_tx_blocking(g->dev, cmd, len, 1000) != ESP_OK) {
         ets_printf("gw: tx failed (cmd %u)\n", cmd[0]);
@@ -189,8 +276,9 @@ static bool gw_cmd(const uint8_t *cmd, size_t len, int timeout_ms = 1000) {
         ets_printf("gw: no reply to cmd %u\n", cmd[0]);
         return false;
     }
-    if (ack[0] != cmd[0]) {
-        ets_printf("gw: out of sync (got %02x, sent %02x)\n", ack[0], cmd[0]);
+    if (ack[0] != cmd[0] && !rx_resync(cmd[0], ack)) {
+        ets_printf("gw: out of sync (got %02x, sent %02x) and could not recover\n",
+                   ack[0], cmd[0]);
         return false;
     }
     if (ack[1] != 0) {
@@ -832,7 +920,10 @@ static bool track_read(int cyl, int head, int revs, track_out &out, bool verbose
     size_t end = 0;
     bool ok = rx_wait_zero(&end, 5000);
     if (!ok) {
-        ets_printf("gw: flux stream did not terminate\n");
+        // Not lost - still coming. Let it finish before anything else is
+        // said, or the rest of it is read as the next command's answer.
+        ets_printf("gw: flux stream did not terminate - waiting for the device\n");
+        rx_drain(200, 3000);
     } else {
         const uint8_t *p = g->rx + g->rx_pos;
         const size_t n = end - g->rx_pos;
@@ -1246,7 +1337,8 @@ static bool gw_probe_unit(int unit) {
     if (!g->rx) {
         g->rx = (uint8_t *)heap_caps_malloc(GW_RX_CAP, MALLOC_CAP_SPIRAM);
         g->rx_sig = xSemaphoreCreateBinary();
-        if (!g->rx || !g->rx_sig) {
+        g->rx_lock = xSemaphoreCreateMutex();
+        if (!g->rx || !g->rx_sig || !g->rx_lock) {
             ets_printf("gw: out of memory\n");
             return false;
         }

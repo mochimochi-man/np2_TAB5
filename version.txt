@@ -1,6 +1,12 @@
 np2 TAB5
 
 
+1.1.3   2026-09-13
+
+  - Fixed: a GreaseWeazle drive could stop reading until the board was
+           power-cycled.
+
+
 1.1.2   2026-09-10
 
   - Fixed: SD Card Reader Mode and Disk Image Reader Mode are steadier -
