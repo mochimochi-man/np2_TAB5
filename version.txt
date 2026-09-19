@@ -1,6 +1,11 @@
 np2 TAB5
 
 
+1.1.5   2026-09-20
+
+  - Fixed: Disk Image Reader Mode found no volume in an image.
+
+
 1.1.4   2026-09-20
 
   - Fixed: creating a blank HDD image from the menu left nothing on the

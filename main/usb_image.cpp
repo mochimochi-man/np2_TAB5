@@ -81,9 +81,11 @@ static bool read_at(uint64_t off, void *buf, size_t len) {
 // Is this a FAT boot sector? Checked rather than assumed, because it is what
 // tells us the partition table was read correctly.
 static bool bpb_looks_sane(const uint8_t *sec, uint32_t *out_bps, uint32_t *out_total) {
-    if (sec[510] != 0x55 || sec[511] != 0xAA) {
-        return false;
-    }
+    // NOT tested here: the 0x55AA at the end of the sector. That is a PC/AT
+    // convention; a PC-98 boots through its own partition table and MS-DOS 3.30
+    // for the PC-98 leaves those two bytes alone. Requiring them rejected a
+    // perfectly good DOS volume, so the media descriptor below and the first
+    // FAT entry (checked by the caller) do the identifying instead.
     const uint32_t bps = rd16(sec + 11);
     if (bps != 512 && bps != 1024 && bps != 2048 && bps != 4096) {
         return false;
@@ -96,6 +98,9 @@ static bool bpb_looks_sane(const uint8_t *sec, uint32_t *out_bps, uint32_t *out_
         return false;
     }
     if (sec[16] == 0 || sec[16] > 4) {   // number of FATs
+        return false;
+    }
+    if (sec[21] < 0xf0) {                // media descriptor: 0xF0..0xFF
         return false;
     }
     uint32_t total = rd16(sec + 19);
@@ -131,6 +136,20 @@ static bool try_volume(uint64_t off, const char *what) {
     uint32_t bps = 0, total = 0;
     if (!bpb_looks_sane(sec, &bps, &total)) {
         return false;
+    }
+    // The first FAT entry repeats the media descriptor, followed by 0xFF 0xFF.
+    // A run of bytes that merely looks like a BPB will not also have that, so
+    // this is the check that keeps the cylinder scan below honest.
+    {
+        const uint32_t reserved = rd16(sec + 14);
+        const uint8_t media = sec[21];
+        uint8_t fat[512];
+        if (!read_at(off + (uint64_t)reserved * bps, fat, sizeof(fat))) {
+            return false;
+        }
+        if (fat[0] != media || fat[1] != 0xff || fat[2] != 0xff) {
+            return false;
+        }
     }
     s_vol_off = off;
     s_blk_size = bps;
@@ -197,15 +216,23 @@ extern "C" bool usb_image_open(void) {
 
     // ---- the PC-98 partition table, at disk sector 1 --------------------
     static uint8_t ptbl[512];
+    uint64_t first_cand = 0;      // where the table said the first volume was
     memset(ptbl, 0, sizeof(ptbl));
     if (read_at((uint64_t)headersize + secsize, ptbl, sizeof(ptbl))) {
         for (int i = 0; i < 16; i++) {
             const uint8_t *e = ptbl + i * 32;
+            // A PC-98 partition entry, laid out as np2kai's own sxsihdd.c
+            // reads it:
+            //   0 mid, 1 sid, 2-3 unused, 4 ipl_sct, 5 ipl_head, 6-7 ipl_cyl,
+            //   8 sector, 9 head, 10-11 cylinder, 12 end_sector, 13 end_head,
+            //   14-15 end_cylinder, 16-31 name.
+            // Reading the start CHS from 6/7/8 picked up the IPL's own address
+            // instead, which points at the partition table itself.
             const uint8_t sid = e[1];
-            const uint8_t s_sct = e[6];
-            const uint8_t s_hd  = e[7];
-            const uint16_t s_cyl = rd16(e + 8);
-            const uint16_t e_cyl = rd16(e + 12);
+            const uint8_t s_sct = e[8];
+            const uint8_t s_hd  = e[9];
+            const uint16_t s_cyl = rd16(e + 10);
+            const uint16_t e_cyl = rd16(e + 14);
             if (sid == 0 && s_cyl == 0 && e_cyl == 0) {
                 continue;   // unused entry
             }
@@ -216,6 +243,9 @@ extern "C" bool usb_image_open(void) {
             char what[48];
             snprintf(what, sizeof(what), "partition %d (sid %02x, C/H/S %u/%u/%u)",
                      i, sid, (unsigned)s_cyl, (unsigned)s_hd, (unsigned)s_sct);
+            if (!first_cand) {
+                first_cand = (uint64_t)headersize + lba * secsize;
+            }
             if (try_volume((uint64_t)headersize + lba * secsize, what)) {
                 snprintf(s_status, sizeof(s_status), "partition %d, %u-byte sectors",
                          i, (unsigned)s_blk_size);
@@ -259,6 +289,9 @@ extern "C" bool usb_image_open(void) {
             dump("disk sector 0 (IPL), first 64 bytes:", sec, 64);
         }
         dump("disk sector 1 (partition table), first 128 bytes:", ptbl, 128);
+        if (first_cand && read_at(first_cand, sec, sizeof(sec))) {
+            dump("first partition's boot sector, first 64 bytes:", sec, 64);
+        }
     }
     snprintf(s_status, sizeof(s_status), "no FAT volume found in the image");
     ets_printf("usb_image: no FAT volume anywhere in the image\n");
