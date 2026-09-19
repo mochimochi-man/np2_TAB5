@@ -419,10 +419,15 @@ UINT file_write(FILEH handle, const void *data, UINT length) {
     RFILE *h = (RFILE *)handle;
     if (!h) return 0;
     if (h->fd < 0) return 0;                      // built-in ROMs are read-only
-    IoReq r{}; r.op = IOP_WRITE; r.fd = h->fd;
-    r.buf = (void *)data; r.len = length;
-    long n = io_call(r);
-    return (n < 0) ? 0 : (UINT)n;
+    UINT done = 0;                      // loop: a short write is not an error
+    while (done < length) {
+        IoReq r{}; r.op = IOP_WRITE; r.fd = h->fd;
+        r.buf = (void *)((const uint8_t *)data + done); r.len = length - done;
+        long n = io_call(r);
+        if (n <= 0) break;
+        done += (UINT)n;
+    }
+    return done;
 }
 short file_close(FILEH handle) {
     RFILE *h = (RFILE *)handle;

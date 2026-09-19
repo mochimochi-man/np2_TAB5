@@ -524,6 +524,64 @@ static uint8_t wait_key(void) {
     }
 }
 
+// Create a blank .NHD image, written in small chunks with a progress line.
+//
+// np2kai's newdisk_nhd_ex() cannot be used for this: writehddiplex2() sizes its
+// work buffer from the image size and asks malloc() for 8MB for anything larger
+// than 8MB. That allocation cannot succeed while the emulator holds most of the
+// PSRAM, and it then returned FAILURE and file_delete()d the image it had just
+// created - "Create New Disk" said "done" and left nothing on the card. The
+// on-disk result is the same as np2kai's blank=1 (T98 NHD header + zeros), but
+// written 16KB at a time, so progress can be shown and ESC can cancel.
+static bool create_nhd(const char *path, UINT mb, bool *cancelled) {
+    const UINT32 C = (UINT32)mb * 15;            // np2kai hddsize2CHS(), <=4351MB
+    const UINT16 H = 8, S = 17, SS = 512;
+    const uint64_t total = (uint64_t)C * H * S * SS;
+
+    NHDHDR nhd;
+    ZeroMemory(&nhd, sizeof(nhd));
+    CopyMemory(nhd.sig, sig_nhd, 15);
+    STOREINTELDWORD(nhd.headersize, sizeof(nhd));
+    STOREINTELDWORD(nhd.cylinders, C);
+    STOREINTELWORD(nhd.surfaces, H);
+    STOREINTELWORD(nhd.sectors, S);
+    STOREINTELWORD(nhd.sectorsize, SS);
+
+    // Internal DMA-capable RAM when some is free (the SD driver writes straight
+    // out of it); otherwise ordinary PSRAM, which dosio_sd bounces in 2KB pieces.
+    const UINT chunk = 16 * 1024;
+    uint8_t *work = (uint8_t *)heap_caps_malloc(chunk, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!work) work = (uint8_t *)malloc(chunk);
+    if (!work) return false;
+    memset(work, 0, chunk);
+
+    FILEH fh = file_create((const OEMCHAR *)path);
+    if (fh == FILEH_INVALID) { free(work); return false; }
+
+    bool ok = (file_write(fh, &nhd, sizeof(nhd)) == sizeof(nhd));
+    uint64_t left = total;
+    int lastpct = -1;
+    while (ok && left) {
+        UINT n = (UINT)((left < chunk) ? left : chunk);
+        if (file_write(fh, work, n) != n) { ok = false; break; }
+        left -= n;
+        int pct = (int)(((total - left) * 100) / total);
+        if (pct != lastpct) {
+            char line[48];
+            snprintf(line, sizeof(line), "  creating... %d%%  (ESC: cancel)", pct);
+            lcd_menu_line(4, line, COL_WHITE, COL_BLACK);
+            lastpct = pct;
+        }
+        uint8_t nk, dn;
+        while (menu_key_pop(&nk, &dn))
+            if (dn && nk == NK_ESC) { *cancelled = true; ok = false; }
+    }
+    file_close(fh);
+    free(work);
+    if (!ok) file_delete((const OEMCHAR *)path);      // no half-written image
+    return ok;
+}
+
 // Create a blank FD/HDD image on the SD card (name typed on USB keyboard).
 static void newdisk_flow(void) {
     static const struct { const char *label; int mb; } types[] = {
@@ -584,13 +642,17 @@ static void newdisk_flow(void) {
         return;
     }
     lcd_menu_line(4, "  creating...", COL_WHITE, COL_BLACK);
+    bool ok, cancelled = false;
     if (mb == 0) {
         newdisk_144mb_fdd((const OEMCHAR *)path);
+        ok = (file_attr((const OEMCHAR *)path) >= 0);   // it reports nothing itself
     } else {
-        int prog = 0, cancel = 0;
-        newdisk_nhd_ex((const OEMCHAR *)path, (UINT)mb, 1, &prog, &cancel);
+        ok = create_nhd(path, (UINT)mb, &cancelled);
     }
-    lcd_menu_line(4, "  done (format in DOS)", COL_WHITE, COL_BLACK);
+    lcd_menu_line(4, cancelled ? "  cancelled"
+                    : ok       ? "  done (format in DOS)"
+                               : "  FAILED (card full or write error)",
+                  COL_WHITE, COL_BLACK);
     vTaskDelay(pdMS_TO_TICKS(1500));
 }
 

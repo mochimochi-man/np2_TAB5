@@ -1,6 +1,12 @@
 np2 TAB5
 
 
+1.1.4   2026-09-20
+
+  - Fixed: creating a blank HDD image from the menu left nothing on the
+           card.
+
+
 1.1.3   2026-09-13
 
   - Fixed: a GreaseWeazle drive could stop reading until the board was
