@@ -27,11 +27,10 @@
 // accepted if a FAT BPB is actually sitting there. If the CHS conversion were
 // wrong the check fails and this says so, instead of handing the host garbage.
 //
-// The one thing that cannot be worked around here is the volume's logical
-// sector size. It is reported to the host as-is (that is the honest thing, and
-// gives the best chance of a mount), but Windows in practice only accepts 512;
-// a PC-98 volume formatted with 1024-byte logical sectors will be seen and
-// refused. That is a property of the image, so it is printed prominently.
+// The volume's logical sector size is reported to the host as it is. PC-98
+// volumes are often formatted with 1024-byte sectors and those mount fine;
+// the size is printed with the rest of the geometry, as information rather
+// than as a problem.
 
 #include <stdio.h>
 #include <string.h>
@@ -298,12 +297,6 @@ extern "C" bool usb_image_open(void) {
     return false;
 
 found:
-    if (s_blk_size != 512) {
-        ets_printf("usb_image: WARNING - this volume uses %u-byte logical sectors.\n"
-                   "           Windows only mounts 512, so it will very likely be\n"
-                   "           seen and refused. The image needs rebuilding with\n"
-                   "           512-byte sectors.\n", (unsigned)s_blk_size);
-    }
     return true;
 }
 

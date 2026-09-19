@@ -862,12 +862,6 @@ static void draw_screen(void) {
             const uint64_t mb = ((uint64_t)usb_image_block_count() * usb_image_block_size()) >> 20;
             snprintf(line, sizeof(line), MODE_INDENT "%u MB volume on the PC.", (unsigned)mb);
             lcd_menu_line(4, line, COL_WHITE, COL_BLACK);
-            if (usb_image_block_size() != 512) {
-                lcd_menu_line(6, MODE_INDENT "NOTE: not 512-byte sectors - Windows will",
-                              COL_WHITE, COL_BLACK);
-                lcd_menu_line(7, MODE_INDENT "probably refuse to mount it.",
-                              COL_WHITE, COL_BLACK);
-            }
         } else {
             snprintf(line, sizeof(line), MODE_INDENT "FAILED: %.48s", usb_image_status());
             lcd_menu_line(3, line, COL_WHITE, COL_BLACK);
