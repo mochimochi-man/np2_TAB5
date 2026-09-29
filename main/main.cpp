@@ -356,8 +356,9 @@ static void emu_task(void *arg) {
     // real-time headroom left per frame: x4 8.3ms, x5 6.5ms, x6 4.6ms,
     // x8 2.5ms, x10 zero. So x10 is where the P4 stops keeping up even with
     // nothing on screen, and x5 keeps roughly a third of the frame in hand for
-    // whatever the software is actually doing. The S3 forks sat at x3.
-    np2cfg.multiple = 5;
+    // whatever the software is actually doing. The S3 forks sat at x3, and so
+    // does the default here since 1.2.1; the menu still goes up to x10.
+    np2cfg.multiple = 3;
     // Extended (XMS) memory. np2kai clamps a non-IA32 core to 13MB, which is
     // the most a PC-9801VX could take anyway, and _MALLOC lands it in PSRAM -
     // the P4 has 32MB and about 24MB of it free at this point, so the old 1MB

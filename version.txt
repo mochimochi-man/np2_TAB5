@@ -1,6 +1,11 @@
 np2 TAB5
 
 
+1.2.1   2026-09-30
+
+  - Changed: the default CPU clock is x3.
+
+
 1.2.0   2026-09-29
 
   - Added: 386 instructions for real-mode programs (CPU menu), and the VX's EGC.
