@@ -44,9 +44,18 @@ Bluetooth is off while this mode runs; tap the screen to leave it.
 
 ### Disk Image Reader mode
 
-Presents the currently mounted hard disk image to a PC as a drive. The transfer
-rate is about 0.6MB/s, which is very slow.
+Presents a mounted disk image to a PC as a drive: the HDD image, or the floppy
+image in FDD1 or FDD2 (`.NFD`, `.D88`, `.HDM`, `.FDI`) - the drive is chosen when
+entering the mode. Disks with 1024-byte sectors are shown to the PC as 512-byte
+sectors; the image file keeps its own format. The transfer rate is about
+0.6MB/s, which is very slow.
 Bluetooth is off while this mode runs; tap the screen to leave it.
+
+### 386 instructions
+
+With **CPU: 80286 + 386 instructions** in the menu (the default), real-mode
+software that uses 386 instructions runs. Protected mode is not supported, and
+the machine still identifies itself as a 286.
 
 ### GreaseWeazle mode
 

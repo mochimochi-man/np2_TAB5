@@ -88,6 +88,17 @@ typedef void (CPUCALL * I286OP_0F)(UINT op);
 
 I286EXT i286c_cts(void);
 
+// 386 extension (i286c_386.inc)
+void i386x_0f(UINT op2, UINT16 ip0, int o32);
+void i386x_reset(void);
+extern int i386x_enabled;
+extern UINT16 i386x_fs, i386x_gs;
+extern UINT32 i386x_fs_base, i386x_gs_base;
+extern int i386x_eahook;				// 67h: the next address calculation is precomputed
+UINT32 i386x_ea_take(void);
+UINT16 i386x_lea_take(void);
+UINT i386x_getea_take(UINT32 *seg);
+
 
 #define	I286_8X	static void CPUCALL
 typedef void (CPUCALL * I286OP8XREG8)(UINT8 *p);

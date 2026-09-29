@@ -96,16 +96,16 @@ typedef UINT (*GETLEA)(UINT32 *seg);
 extern	CALCEA	_calc_ea_dst[];
 extern	CALCLEA	_calc_lea[];
 extern	GETLEA	_get_ea[];
-#define	CALC_EA(o)		(_calc_ea_dst[(o)]())
-#define	CALC_LEA(o)		(_calc_lea[(o)]())
-#define	GET_EA(o, s)	(_get_ea[(o)](s))
+#define	CALC_EA(o)		(__builtin_expect(i386x_eahook, 0) ? i386x_ea_take() : _calc_ea_dst[(o)]())
+#define	CALC_LEA(o)		(__builtin_expect(i386x_eahook, 0) ? i386x_lea_take() : _calc_lea[(o)]())
+#define	GET_EA(o, s)	(__builtin_expect(i386x_eahook, 0) ? i386x_getea_take(s) : _get_ea[(o)](s))
 #else
 extern UINT32 calc_ea_dst(UINT op);
 extern UINT16 calc_lea(UINT op);
 extern UINT calc_a(UINT op, UINT32 *seg);
-#define	CALC_EA(o)		(calc_ea_dst(o))
-#define	CALC_LEA(o)		(calc_lea(o))
-#define	GET_EA(o, s)	(calc_a(o, s))
+#define	CALC_EA(o)		(__builtin_expect(i386x_eahook, 0) ? i386x_ea_take() : calc_ea_dst(o))
+#define	CALC_LEA(o)		(__builtin_expect(i386x_eahook, 0) ? i386x_lea_take() : calc_lea(o))
+#define	GET_EA(o, s)	(__builtin_expect(i386x_eahook, 0) ? i386x_getea_take(s) : calc_a(o, s))
 #endif
 
 

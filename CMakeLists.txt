@@ -15,7 +15,7 @@ idf_build_set_property(COMPILE_OPTIONS "-Wno-error;-Wno-stringop-truncation;-Wno
 # the release notes, not a version - and the image ended up calling itself
 # "np2 TAB5", or, when built from the working tree, "build 20260808 first
 # release.". Neither told anyone which firmware they were holding.
-set(PROJECT_VER "1.1.0")
+set(PROJECT_VER "1.2.0")
 
 project(np2_espresso)
 

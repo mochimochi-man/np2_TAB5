@@ -1642,7 +1642,16 @@ I286FN _mov_ea_seg(void) {					// 8C:	mov		EA, segreg
 	UINT16	tmp;
 
 	GET_PCBYTE(op);
-	tmp = *SEGMENTPTR((op >> 3) & 3);
+	if ((op & 0x20) && i386x_enabled) {		// FS / GS (i286c_386.inc)
+		if (op & 0x10) {
+			INT_NUM(6, I286_IP - 2);
+			return;
+		}
+		tmp = (op & 0x08) ? i386x_gs : i386x_fs;
+	}
+	else {
+		tmp = *SEGMENTPTR((op >> 3) & 3);
+	}
 	if (op >= 0xc0) {
 		I286_WORKCLOCK(2);
 		*(REG16_B20(op)) = tmp;
@@ -1683,6 +1692,20 @@ I286FN _mov_seg_ea(void) {					// 8E:	mov		segrem, EA
 	else {
 		I286_WORKCLOCK(5);
 		tmp = i286_memoryread_w(CALC_EA(op));
+	}
+	if ((op & 0x20) && i386x_enabled) {		// FS / GS (i286c_386.inc)
+		if (op & 0x10) {
+			INT_NUM(6, ipbak - 1);
+		}
+		else if (op & 0x08) {
+			i386x_gs = (UINT16)tmp;
+			i386x_gs_base = (UINT32)tmp << 4;
+		}
+		else {
+			i386x_fs = (UINT16)tmp;
+			i386x_fs_base = (UINT32)tmp << 4;
+		}
+		return;
 	}
 	base = SEGSELECT(tmp);
 	switch(op & 0x18) {
@@ -2734,6 +2757,20 @@ I286FN _ope0xff(void) {						// FF:
 
 // -------------------------------------------------------------------------
 
+// 386 extension handlers (i286c_386.c)
+void _opsize32(void);
+void _repe_opsize32(void);
+void _repne_opsize32(void);
+void _addrsize32(void);
+void _repe_addrsize32(void);
+void _repne_addrsize32(void);
+void _segprefix_fs(void);
+void _segprefix_gs(void);
+void _repe_segprefix_fs(void);
+void _repe_segprefix_gs(void);
+void _repne_segprefix_fs(void);
+void _repne_segprefix_gs(void);
+
 const I286OP i286op[] = {
 			_add_ea_r8,						// 00:	add		EA, REG8
 			_add_ea_r16,					// 01:	add		EA, REG16
@@ -2841,10 +2878,10 @@ const I286OP i286op[] = {
 			_popa,							// 61:	popa
 			_bound,							// 62:	bound
 			_arpl,							// 63:	arpl
-			_reserved,						// 64:	reserved
-			_reserved,						// 65:	reserved
-			_reserved,						// 66:	reserved
-			_reserved,						// 67:	reserved
+			_segprefix_fs,						// 64: fs:
+			_segprefix_gs,						// 65: gs:
+			_opsize32,						// 66: operand size
+			_addrsize32,						// 67: address size
 			_push_data16,					// 68:	push	DATA16
 			_imul_reg_ea_data16,			// 69:	imul	REG, EA, DATA16
 			_push_data8,					// 6A:	push	DATA8
@@ -3187,10 +3224,10 @@ const I286OP i286op_repe[] = {
 			_popa,							// 61:	popa
 			_bound,							// 62:	bound
 			_arpl,							// 63:	arpl
-			_reserved,						// 64:	reserved
-			_reserved,						// 65:	reserved
-			_reserved,						// 66:	reserved
-			_reserved,						// 67:	reserved
+			_repe_segprefix_fs,						// 64: fs:
+			_repe_segprefix_gs,						// 65: gs:
+			_repe_opsize32,						// 66: operand size
+			_repe_addrsize32,						// 67: address size
 			_push_data16,					// 68:	push	DATA16
 			_imul_reg_ea_data16,			// 69:	imul	REG, EA, DATA16
 			_push_data8,					// 6A:	push	DATA8
@@ -3532,10 +3569,10 @@ const I286OP i286op_repne[] = {
 			_popa,							// 61:	popa
 			_bound,							// 62:	bound
 			_arpl,							// 63:	arpl
-			_reserved,						// 64:	reserved
-			_reserved,						// 65:	reserved
-			_reserved,						// 66:	reserved
-			_reserved,						// 67:	reserved
+			_repne_segprefix_fs,						// 64: fs:
+			_repne_segprefix_gs,						// 65: gs:
+			_repne_opsize32,						// 66: operand size
+			_repne_addrsize32,						// 67: address size
 			_push_data16,					// 68:	push	DATA16
 			_imul_reg_ea_data16,			// 69:	imul	REG, EA, DATA16
 			_push_data8,					// 6A:	push	DATA8

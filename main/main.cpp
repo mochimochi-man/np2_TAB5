@@ -76,6 +76,11 @@ void audio_set_volume(int percent);     // audio_codec.cpp
 // Backlight percentage, shared with the menu row that changes it. Restored
 // from NVS at boot, applied once the panel is up.
 extern "C" int g_backlight_pct = 100;
+// CPU chosen in the menu: 0 = V30, 1 = 80286, 2 = 80286 + 386 instructions. Read
+// once at boot - the menu shows a change as pending until RESET.
+extern "C" int g_cpu_mode = 2;
+extern "C" int g_cpu_mode_boot = 2;
+extern "C" int i386x_enabled;          // i286c/i286c_386.inc
 void usb_msc_run(int mode);        // usb_msc.cpp: USB mass storage (never returns)
 int  usb_kbd_pop(uint8_t *nkey, uint8_t *down);  // drain one key event
 extern volatile int g_menu_req;      // usb_kbd.cpp: Pause/Break -> disk swap menu
@@ -338,6 +343,10 @@ static void emu_task(void *arg) {
     // --- np2 config ---
     pccore_setdefault();
     milstr_ncpy(np2cfg.model, "VX", sizeof(np2cfg.model));   // PC-9801VX (80286: XMS/HIMEM capable)
+    // The VX has an EGC, and the default here (2) left it out. Software that
+    // copies VRAM with the EGC - the stage backgrounds in Touhou Fuumaroku -
+    // then drew solid blocks through the plain GRCG instead.
+    np2cfg.grcg = 3;
     // Emulated V30 @ ~4.92MHz = base 2.4576MHz x2. x4 (authentic VM21 9.83MHz)
     // left the i286c core at ~17ms/frame with ZERO graphics — borderline for
     // real time, so games dipped below it and FM audio (22050 samples/s tied
@@ -461,6 +470,8 @@ static void emu_task(void *arg) {
             if (nvs_get_u8(nh, "volume", &v) == ESP_OK && v <= 100) {
                 audio_set_volume(((v + 5) / 10) * 10);
             }
+            if (nvs_get_u8(nh, "cpumode", &v) == ESP_OK && v <= 2)
+                g_cpu_mode = v;
             if (nvs_get_u8(nh, "multiple", &v) == ESP_OK && v >= 1 && v <= CPU_MULT_MAX)
                 np2cfg.multiple = v;
             if (nvs_get_u8(nh, "scaler", &v) == ESP_OK && v < lcd_scale_mode_count())
@@ -475,6 +486,16 @@ static void emu_task(void *arg) {
             nvs_close(nh);
         }
     }
+
+    // The V30 is DIP switch 3-8, read by pccore_reset. The 386 is the 286
+    // core with the instructions in i286c_386.inc switched on.
+    if (g_cpu_mode == 0) {
+        np2cfg.dipsw[2] |= 0x80;
+    } else {
+        np2cfg.dipsw[2] &= (UINT8)~0x80;
+    }
+    i386x_enabled = (g_cpu_mode == 2);
+    g_cpu_mode_boot = g_cpu_mode;
 
     dosio_init();
     keystat_initialize();

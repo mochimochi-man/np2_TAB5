@@ -183,6 +183,7 @@ static void i286c_initreg(void) {
 #if defined(VAEG_FIX)
 void i286c_reset(void) {
 	ZeroMemory(&i286core.s, sizeof(i286core.s));
+	i386x_reset();
 	if (CPU_TYPE == CPUTYPE_V30) {
 		v30c_initreg();
 	}
@@ -193,6 +194,7 @@ void i286c_reset(void) {
 #else
 void i286c_reset(void) {
 	ZeroMemory(&i286core.s, sizeof(i286core.s));
+	i386x_reset();
 	i286c_initreg();
 }
 #endif

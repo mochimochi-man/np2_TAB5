@@ -282,7 +282,7 @@ I286EXT i286c_cts(void) {
 		_loadall286();
 	}
 	else {
-		INT_NUM(6, ip - 1);
+		i386x_0f(op, (UINT16)(ip - 1), 0);	// 386 opcodes (i286c_386.inc)
 	}
 }
 

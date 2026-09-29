@@ -1,6 +1,12 @@
 np2 TAB5
 
 
+1.2.0   2026-09-29
+
+  - Added: 386 instructions for real-mode programs (CPU menu), and the VX's EGC.
+  - Added: Disk Image Reader Mode opens floppy images (HDM, D88, NFD, FDI) and 1024-byte-sector HDD volumes.
+
+
 1.1.5   2026-09-20
 
   - Fixed: Disk Image Reader Mode found no volume in an image.

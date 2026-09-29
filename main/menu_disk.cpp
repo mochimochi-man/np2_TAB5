@@ -33,6 +33,23 @@ int  usb_kbd_pop(uint8_t *nkey, uint8_t *down);   // usb_kbd.cpp
 }
 
 extern volatile int g_speed_req;    // main.cpp applies the new CPU multiple
+extern "C" int g_cpu_mode;          // main.cpp: 0 = V30, 1 = 80286, 2 = 80286 + 386 instructions
+extern "C" int g_cpu_mode_boot;     // ...and the one this boot is running
+
+static const char *cpu_name(int m) {
+    return m == 0 ? "V30" : m == 1 ? "80286" : "80286 + 386 instructions";
+}
+
+// Same rule as the other value rows: arrows stop at the ends, RET wraps.
+static int cpu_step(int cur, int dir, bool wrap) {
+    int v = cur + dir;
+    if (v > 2) {
+        v = wrap ? 0 : 2;
+    } else if (v < 0) {
+        v = wrap ? 2 : 0;
+    }
+    return v;
+}
 
 // LCD text helpers (lcd_st7789.cpp)
 extern "C" void lcd_menu_clear(void);
@@ -205,49 +222,56 @@ static void draw_drives(int sel) {
                  sel == 4 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(6, line, sel == 4 ? COL_BLACK : COL_WHITE,
                       sel == 4 ? COL_YELLOW : COL_BLACK);
+        // Read at boot, so a change waits for RESET - and says so.
+        snprintf(line, sizeof(line), "%s CPU: %s%s", sel == 5 ? ">" : " ",
+                 cpu_name(g_cpu_mode),
+                 g_cpu_mode != g_cpu_mode_boot ? "   (RESET to apply)"
+                 : sel == 5 ? "   (LEFT/RIGHT or RET)" : "");
+        lcd_menu_line(7, line, sel == 5 ? COL_BLACK : COL_WHITE,
+                      sel == 5 ? COL_YELLOW : COL_BLACK);
         // No scaler row on this board: the panel shows the PC-98 640x400 screen
         // at native size, so lcd_rgb.cpp's scaler API is a one-mode stub. (And
         // no LCD SPI clock row either - this panel is driven over the parallel
         // RGB bus; only its power-on init sequence goes over SPI.)
         // The ROM in use, chosen from whatever BIOS*.ROM / FONT*.ROM sit in the SD
         // root. Both are read once at pccore_init, so a change needs a reboot.
-        snprintf(line, sizeof(line), "%s BIOS: %.24s", sel == 5 ? ">" : " ",
+        snprintf(line, sizeof(line), "%s BIOS: %.24s", sel == 6 ? ">" : " ",
                  g_bios_file[0] ? g_bios_file : "(built-in compatible)");
-        lcd_menu_line(7, line, sel == 5 ? COL_BLACK : COL_WHITE,
-                      sel == 5 ? COL_YELLOW : COL_BLACK);
-        snprintf(line, sizeof(line), "%s FONT: %.24s", sel == 6 ? ">" : " ",
-                 g_font_file[0] ? g_font_file : "(built-in compatible)");
         lcd_menu_line(8, line, sel == 6 ? COL_BLACK : COL_WHITE,
                       sel == 6 ? COL_YELLOW : COL_BLACK);
-        snprintf(line, sizeof(line), "%s Backlight: %d%%%s", sel == 7 ? ">" : " ",
-                 g_backlight_pct, sel == 7 ? "   (LEFT/RIGHT or RET)" : "");
+        snprintf(line, sizeof(line), "%s FONT: %.24s", sel == 7 ? ">" : " ",
+                 g_font_file[0] ? g_font_file : "(built-in compatible)");
         lcd_menu_line(9, line, sel == 7 ? COL_BLACK : COL_WHITE,
                       sel == 7 ? COL_YELLOW : COL_BLACK);
-        snprintf(line, sizeof(line), "%s Volume: %d%%%s", sel == 8 ? ">" : " ",
-                 audio_get_volume(), sel == 8 ? "   (LEFT/RIGHT or RET)" : "");
+        snprintf(line, sizeof(line), "%s Backlight: %d%%%s", sel == 8 ? ">" : " ",
+                 g_backlight_pct, sel == 8 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(10, line, sel == 8 ? COL_BLACK : COL_WHITE,
                       sel == 8 ? COL_YELLOW : COL_BLACK);
-        // The last file written, so the row itself is the confirmation - a
-        // screenshot needs no screen of its own to report one line.
-        snprintf(line, sizeof(line), "%s Screenshot: %s", sel == 9 ? ">" : " ",
-                 s_last_shot[0] ? s_last_shot : "save the screen as PNG");
+        snprintf(line, sizeof(line), "%s Volume: %d%%%s", sel == 9 ? ">" : " ",
+                 audio_get_volume(), sel == 9 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(11, line, sel == 9 ? COL_BLACK : COL_WHITE,
                       sel == 9 ? COL_YELLOW : COL_BLACK);
-        // Reboot into the SD card reader (usb_msc.cpp). One-shot: the flag is
-        // consumed at boot, so replugging USB comes back as the emulator.
-        snprintf(line, sizeof(line), "%s SD Card Reader Mode", sel == 10 ? ">" : " ");
+        // The last file written, so the row itself is the confirmation - a
+        // screenshot needs no screen of its own to report one line.
+        snprintf(line, sizeof(line), "%s Screenshot: %s", sel == 10 ? ">" : " ",
+                 s_last_shot[0] ? s_last_shot : "save the screen as PNG");
         lcd_menu_line(12, line, sel == 10 ? COL_BLACK : COL_WHITE,
                       sel == 10 ? COL_YELLOW : COL_BLACK);
-        // One level down from the row above: instead of the card, the PC gets
-        // the DOS volume inside the mounted HDD image.
-        snprintf(line, sizeof(line), "%s Disk Image Reader Mode", sel == 11 ? ">" : " ");
+        // Reboot into the SD card reader (usb_msc.cpp). One-shot: the flag is
+        // consumed at boot, so replugging USB comes back as the emulator.
+        snprintf(line, sizeof(line), "%s SD Card Reader Mode", sel == 11 ? ">" : " ");
         lcd_menu_line(13, line, sel == 11 ? COL_BLACK : COL_WHITE,
                       sel == 11 ? COL_YELLOW : COL_BLACK);
-        // Last, where an action that throws the machine away belongs - not in
-        // the middle of the settings, a keypress away from the volume.
-        snprintf(line, sizeof(line), "%s RESET (save & reboot)", sel == 12 ? ">" : " ");
+        // One level down from the row above: instead of the card, the PC gets
+        // the DOS volume inside a mounted disk image (the drive is asked next).
+        snprintf(line, sizeof(line), "%s Disk Image Reader Mode", sel == 12 ? ">" : " ");
         lcd_menu_line(14, line, sel == 12 ? COL_BLACK : COL_WHITE,
                       sel == 12 ? COL_YELLOW : COL_BLACK);
+        // Last, where an action that throws the machine away belongs - not in
+        // the middle of the settings, a keypress away from the volume.
+        snprintf(line, sizeof(line), "%s RESET (save & reboot)", sel == 13 ? ">" : " ");
+        lcd_menu_line(15, line, sel == 13 ? COL_BLACK : COL_WHITE,
+                      sel == 13 ? COL_YELLOW : COL_BLACK);
     }
 }
 
@@ -664,6 +688,7 @@ static void save_settings(void) {
     nvs_handle_t nh;
     if (nvs_open("pc98", NVS_READWRITE, &nh) == ESP_OK) {
         nvs_set_u8(nh, "multiple", (uint8_t)np2cfg.multiple);
+        nvs_set_u8(nh, "cpumode", (uint8_t)g_cpu_mode);
         nvs_set_u8(nh, "scaler", (uint8_t)lcd_get_scale_mode());
         nvs_set_u8(nh, "backlight", (uint8_t)g_backlight_pct);
         nvs_set_u8(nh, "volume", (uint8_t)audio_get_volume());
@@ -678,6 +703,49 @@ static void save_settings(void) {
     }
 }
 
+// Disk Image Reader Mode: which drive's image to hand the PC. Returns the drive
+// (0 = FDD1, 1 = FDD2, 2 = HDD) or -1 on ESC, and leaves the choice in NVS for
+// usb_image.cpp to read after the reboot. Only a drive with an image file in it
+// can be chosen; a Greaseweazle drive has no file behind it.
+static int choose_image_drive(void) {
+    static const int order[3] = { 2, 0, 1 };      // HDD first, as it always was
+    auto usable = [](int d) {
+        const char *p = (d == 2) ? (const char *)np2cfg.sasihdd[0] : (const char *)np2cfg.fddfile[d];
+        return p[0] != 0 && !(d < 2 && fdd_gw_live_mounted(d));
+    };
+    int sel = 0;
+    while (sel < 2 && !usable(order[sel])) {
+        sel++;
+    }
+    lcd_menu_clear();
+    for (;;) {
+        lcd_menu_line(0, MODE_INDENT "Disk Image Reader Mode: which drive?", COL_YELLOW, COL_BLACK);
+        for (int i = 0; i < 3; i++) {
+            const int d = order[i];
+            char line[96];
+            snprintf(line, sizeof(line), "%s %s : %.46s", i == sel ? ">" : " ",
+                     drv_label(d), usable(d) ? drv_current(d) : "(no image file)");
+            lcd_menu_line(2 + i, line, i == sel ? COL_BLACK : COL_WHITE,
+                          i == sel ? COL_YELLOW : COL_BLACK);
+        }
+        const uint8_t nk = wait_key();
+        if (nk == NK_ESC) {
+            return -1;
+        }
+        if (key_is_up(nk) && sel > 0) sel--;
+        if (key_is_down(nk) && sel < 2) sel++;
+        if (nk == NK_RET && usable(order[sel])) {
+            nvs_handle_t nh;
+            if (nvs_open("pc98", NVS_READWRITE, &nh) == ESP_OK) {
+                nvs_set_u8(nh, "usbimgdrv", (uint8_t)order[sel]);
+                nvs_commit(nh);
+                nvs_close(nh);
+            }
+            return order[sel];
+        }
+    }
+}
+
 extern "C" void menu_disk_run(void) {
     int sel = 0;
     lcd_menu_clear();
@@ -688,21 +756,23 @@ extern "C" void menu_disk_run(void) {
         if (!dn) continue;
         if (nk == NK_ESC) break;
         if (key_is_up(nk)   && sel > 0) sel--;
-        if (key_is_down(nk) && sel < 12) sel++;
+        if (key_is_down(nk) && sel < 13) sel++;
         // Left/right adjust the rows that hold a value rather than doing
         // something; everywhere else they are ignored.
         {
             const int dir = key_is_right(nk) ? 1 : (key_is_left(nk) ? -1 : 0);
             if (dir) {
-                if (sel == 7) {
+                if (sel == 8) {
                     g_backlight_pct = level_step(g_backlight_pct, dir, false);
                     tab5_backlight_set(g_backlight_pct);
-                } else if (sel == 8) {
+                } else if (sel == 9) {
                     audio_set_volume(level_step(audio_get_volume(), dir, false));
                 } else if (sel == 4) {
                     const UINT mult = clock_step(np2cfg.multiple, dir, false);
                     np2cfg.multiple = mult;       // display follows immediately
                     g_speed_req = (int)mult;      // emulator loop applies it
+                } else if (sel == 5) {
+                    g_cpu_mode = cpu_step(g_cpu_mode, dir, false);
                 }
             }
         }
@@ -714,23 +784,30 @@ extern "C" void menu_disk_run(void) {
                 const UINT mult = clock_step(np2cfg.multiple, 1, true);
                 np2cfg.multiple = mult;         // display follows immediately
                 g_speed_req = (int)mult;        // emulator loop applies it
-            } else if (sel == 5) {              // BIOS ROM: pick a file from the SD
+            } else if (sel == 5) {              // CPU: next, wrapping
+                g_cpu_mode = cpu_step(g_cpu_mode, 1, true);
+            } else if (sel == 6) {              // BIOS ROM: pick a file from the SD
                 browse_rom(0);
                 lcd_menu_clear();   // the submenu owned the screen
-            } else if (sel == 6) {              // FONT ROM: pick a file from the SD
+            } else if (sel == 7) {              // FONT ROM: pick a file from the SD
                 browse_rom(1);
                 lcd_menu_clear();   // the submenu owned the screen
-            } else if (sel == 7) {              // Backlight: next, wrapping
+            } else if (sel == 8) {              // Backlight: next, wrapping
                 g_backlight_pct = level_step(g_backlight_pct, 1, true);
                 tab5_backlight_set(g_backlight_pct);
-            } else if (sel == 8) {              // Volume: next, wrapping
+            } else if (sel == 9) {              // Volume: next, wrapping
                 audio_set_volume(level_step(audio_get_volume(), 1, true));
-            } else if (sel == 9) {              // Screenshot
+            } else if (sel == 10) {              // Screenshot
                 if (!screenshot_save(s_last_shot, sizeof(s_last_shot))) {
                     snprintf(s_last_shot, sizeof(s_last_shot), "FAILED");
                 }
-            } else if (sel == 10 || sel == 11) {   // USB Mode: arm the flag, reboot
-                const int m = (sel == 10) ? USB_MODE_SD : USB_MODE_IMAGE;
+            } else if (sel == 11 || sel == 12) {   // USB Mode: arm the flag, reboot
+                const int m = (sel == 11) ? USB_MODE_SD : USB_MODE_IMAGE;
+                if (m == USB_MODE_IMAGE && choose_image_drive() < 0) {
+                    lcd_menu_clear();   // back to the menu
+                    draw_drives(sel);
+                    continue;
+                }
                 save_settings();
                 usb_msc_request(m);
                 lcd_menu_clear();
@@ -752,7 +829,7 @@ extern "C" void menu_disk_run(void) {
                 sd_unmount();
                 panel_tab5_blank_early();
                 esp_restart();
-            } else if (sel == 12) {             // RESET: persist the settings, reboot
+            } else if (sel == 13) {             // RESET: persist the settings, reboot
                 save_settings();
                 sd_unmount();                   // same reason as USB Mode above
                 panel_tab5_blank_early();
