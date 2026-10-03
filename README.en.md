@@ -209,6 +209,8 @@ HDE:1
 DEN:1
 ```
 
+Copy protection cannot be removed.
+
 ---
 
 ## 4. Notes
