@@ -57,7 +57,7 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # ---- USB host ---------------------------------------------------------------
 # External hubs. Off by default in ESP-IDF, and with it off the USB-A port only
-# ever sees a device plugged straight into it: a keyboard or a GreaseWeazle
+# ever sees a device plugged straight into it: a keyboard
 # behind a hub is enumerated by nobody and simply does not exist. There is one
 # socket on this board, so a hub is how anyone uses two things at once.
 CONFIG_USB_HOST_HUBS_SUPPORTED=y

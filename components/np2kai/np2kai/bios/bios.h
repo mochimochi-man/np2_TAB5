@@ -120,6 +120,7 @@ void bios0x1a_pcipnp(void);
 #endif
 
 void bios0x1b(void);
+BOOL bios0x1b_hold(void);
 UINT bios0x1b_wait(void);
 void fddbios_equip(REG8 type, BOOL clear);
 

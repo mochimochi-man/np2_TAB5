@@ -39,6 +39,7 @@ void sound_streamregist(void *hdl, SOUNDCB cbfn);
 void sound_sync(void);
 
 const SINT32 *sound_pcmlock(void);
+UINT sound_pending(void);
 void sound_pcmunlock(const SINT32 *hdl);
 
 #if defined(SUPPORT_WAVEREC)

@@ -48,8 +48,16 @@ void sysmng_deinitialize(void);
 
 void sysmng_update(UINT update);
 void sysmng_cpureset(void);
+#if defined(NP2_ESP32)
+/* The access lamps drawn beside the screen (main/lcd_mipi.cpp). */
+void np2lamp_fdd(REG8 drv);
+void np2lamp_hdd(REG8 drv);
+#define	sysmng_fddaccess(a)		np2lamp_fdd(a)
+#define	sysmng_hddaccess(a)		np2lamp_hdd(a)
+#else
 #define	sysmng_fddaccess(a)
 #define	sysmng_hddaccess(a)
+#endif
 void sysmng_updatecaption(UINT8 flag);
 
 #ifdef __cplusplus

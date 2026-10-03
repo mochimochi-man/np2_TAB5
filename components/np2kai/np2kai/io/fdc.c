@@ -53,9 +53,29 @@ void fdc_intwait(NEVENTITEM item) {
 	}
 }
 
+UINT32 fdc_int_delay;
+
+BOOL (*fdc_track_ready)(REG8 drv, UINT cyl, REG8 hd) = NULL;
+UINT8 fdc_waiting;
+
+static BOOL fdc_hold(void) {
+	if (fdc_track_ready && !fdc_track_ready(fdc.us, fdc.treg[fdc.us], fdc.hd)) {
+		fdc_waiting = 1;
+		fdc.status &= ~(FDCSTAT_RQM | FDCSTAT_DIO | FDCSTAT_NDM);
+		fdc.status |= FDCSTAT_CB | (1 << fdc.us);
+		return TRUE;
+	}
+	return FALSE;
+}
+
 void fdc_interrupt(void) {
 	
-	nevent_set(NEVENT_FDCINT, 512, fdc_intwait, NEVENT_ABSOLUTE);
+	SINT32 clk = 512;
+	if (fdc_int_delay) {
+		clk = (SINT32)fdc_int_delay;
+		fdc_int_delay = 0;
+	}
+	nevent_set(NEVENT_FDCINT, clk, fdc_intwait, NEVENT_ABSOLUTE);
 }
 
 static void fdc_interruptreset(void) {
@@ -275,6 +295,9 @@ static void FDC_ReadDiagnostic(void) {					// cmd: 02
 			if(fdc_lasttreg[fdc.us] != fdc.treg[fdc.us]){
 				fdc.treg[fdc.us] = fdc.C;
 			}
+			if (fdc_hold()) {
+				break;
+			}
 			if (!FDC_DriveCheck(FALSE)) {
 				break;
 			}
@@ -411,6 +434,9 @@ static void FDC_WriteData(void) {						// cmd: 05
 			if(fdc_lasttreg[fdc.us] != fdc.treg[fdc.us]){
 				fdc.treg[fdc.us] = fdc.C;	/* 170101 ST modified to work on Windows 9x/2000 */
 			}
+			if (fdc_hold()) {
+				break;
+			}
 			if (FDC_DriveCheck(TRUE)) {
 				fdc.event = FDCEVENT_BUFRECV;
 				fdc.bufcnt = 128 << fdc.N;
@@ -528,6 +554,9 @@ static void FDC_ReadData(void) {						// cmd: 06
 			get_eotgsldtl();
 			if(fdc_lasttreg[fdc.us] != fdc.treg[fdc.us]){
 				fdc.treg[fdc.us] = fdc.C;	/* 170101 ST modified to work on Windows 9x/2000 */
+			}
+			if (fdc_hold()) {
+				break;
 			}
 			readsector();
 			break;
@@ -695,6 +724,9 @@ static void FDC_ReadID(void) {							// cmd: 0a
 		case FDCEVENT_CMDRECV:
 			fdc.mf = fdc.cmd & 0x40;
 			get_hdus();
+			if (fdc_hold()) {
+				break;
+			}
 			if (fdd_readid() == SUCCESS) {
 				fdcsend_success7();
 				//fdc.status = 0x80; // TEST
@@ -920,6 +952,15 @@ static void fdcstatusreset(void) {
 #ifdef SUPPORT_KAI_IMAGES
 	fdc_diag_mode = FALSE;
 #endif
+}
+
+void fdc_resume(void) {
+
+	if (fdc_waiting) {
+		fdc_waiting = 0;
+		fdc.event = FDCEVENT_CMDRECV;
+		FDC_Ope[fdc.cmd & 0x1f]();
+	}
 }
 
 void DMACCALL fdc_datawrite(REG8 data) {
@@ -1214,6 +1255,7 @@ static const IOINP fdcibe[1] = {fdc_ibe};
 void fdc_reset(const NP2CFG *pConfig) {
 
 	ZeroMemory(&fdc, sizeof(fdc));
+	fdc_waiting = 0;
 	fdc.equip = pConfig->fddequip;
 #if defined(SUPPORT_PC9821)
 	fdc.support144 = 1;

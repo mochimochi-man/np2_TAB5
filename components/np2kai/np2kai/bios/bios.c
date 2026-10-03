@@ -1176,6 +1176,11 @@ UINT MEMCALL biosfunc(UINT32 adrs) {
 
 		case BIOS_BASE + BIOSOFST_1b:
 			CPU_STI;
+			if (bios0x1b_hold()) {
+				CPU_IP = BIOSOFST_1b;
+				CPU_REMCLOCK -= 2000;
+				return(1);
+			}
 			CPU_REMCLOCK -= 200;
 #if defined(BIOS_IO_EMULATION)
 			oldEIP = CPU_EIP;

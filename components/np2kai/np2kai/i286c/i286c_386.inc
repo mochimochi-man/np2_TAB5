@@ -8,8 +8,7 @@
 // the PC-98 is also the STOP key vector - so a game shows its "do not press
 // STOP" message and stops. The instruction list was taken by running such
 // programs on the IA-32 core and recording every 386-only instruction they
-// executed: Touhou Fuumaroku (TH02), Z-frame FINAL, STORM CALIBER GAIDEN,
-// COUNTER ATTACK OF VERRIER THE TRIAL and Burning Star EX.
+// executed.
 //
 // What is here, real mode only:
 //   66h  32-bit operand size for ALU, INC/DEC, PUSH/POP(AD), MOV, LEA, XCHG,

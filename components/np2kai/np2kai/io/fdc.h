@@ -118,6 +118,10 @@ extern "C" {
 
 void fdc_intwait(NEVENTITEM item);
 
+extern UINT32 fdc_int_delay;
+extern BOOL (*fdc_track_ready)(REG8 drv, UINT cyl, REG8 hd);
+extern UINT8 fdc_waiting;
+void fdc_resume(void);
 void fdc_interrupt(void);
 
 void DMACCALL fdc_datawrite(REG8 data);

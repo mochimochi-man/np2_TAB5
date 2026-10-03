@@ -12,6 +12,7 @@
 #include "esp_heap_caps.h"
 #include "esp_psram.h"
 #include "esp_timer.h"
+#include "esp_attr.h"
 
 extern "C" int ets_printf(const char *fmt, ...);
 #include <sys/stat.h>
@@ -37,7 +38,7 @@ extern "C" int g_cpu_mode;          // main.cpp: 0 = V30, 1 = 80286, 2 = 80286 +
 extern "C" int g_cpu_mode_boot;     // ...and the one this boot is running
 
 static const char *cpu_name(int m) {
-    return m == 0 ? "V30" : m == 1 ? "80286" : "80286 + 386 instructions";
+    return m == 0 ? "V30" : m == 1 ? "80286" : "80286 + 386 Instructions";
 }
 
 // Same rule as the other value rows: arrows stop at the ends, RET wraps.
@@ -66,6 +67,13 @@ extern "C" int  audio_get_volume(void);
 #define LEVEL_STEP 10
 #define LEVEL_MIN  10
 extern "C" int g_backlight_pct;   // main.cpp owns it so boot can apply it
+extern "C" int g_line200;         // main.cpp: how 200-line screens are drawn
+extern "C" void line200_apply(int m);
+extern "C" void line200_refresh(void);
+extern "C" void audio_set_fx(int mode);  // audio_codec.cpp: 0 original, 1 warm, 2 hall
+extern "C" int  audio_get_fx(void);
+extern "C" void lcd_lamps_enable(bool on);   // lcd_mipi.cpp: the drive lamps
+extern "C" bool lcd_lamps_enabled(void);
 
 // RET wraps around; the arrow keys nudge, which is what anyone actually wants
 // when the far end of the range is one step in the wrong direction.
@@ -115,9 +123,40 @@ static UINT clock_step(UINT cur, int dir, bool wrap) {
 // Every menu loop polls the keyboard, so this is the one place that is always
 // reached once a screen has finished drawing - and therefore the right place to
 // push the accumulated drawing out to the panel.
+//
+// It is also where a held arrow key repeats. The keyboard reports a press and a
+// release and nothing in between, so without this a long list has to be walked
+// one tap per row. Only the arrows repeat: a held RET or ESC repeating would
+// fire whatever the row does - a mount, a RESET - again and again.
+#define MENU_REPEAT_DELAY_US    400000
+#define MENU_REPEAT_INTERVAL_US  60000
+static inline bool key_repeats(uint8_t nk);
+static uint8_t s_held_nk = 0xff;     // the arrow being held, 0xff = none
+static int64_t s_held_next;          // when it next repeats
+
 static bool menu_key_pop(uint8_t *nk, uint8_t *dn) {
     lcd_menu_flush();
-    return usb_kbd_pop(nk, dn);
+    if (usb_kbd_pop(nk, dn)) {
+        if (*dn && key_repeats(*nk)) {
+            s_held_nk = *nk;
+            s_held_next = esp_timer_get_time() + MENU_REPEAT_DELAY_US;
+        } else if (!*dn && *nk == s_held_nk) {
+            s_held_nk = 0xff;
+        } else if (*dn) {
+            s_held_nk = 0xff;        // another key pressed: the arrow stops
+        }
+        return true;
+    }
+    if (s_held_nk != 0xff) {
+        const int64_t now = esp_timer_get_time();
+        if (now >= s_held_next) {
+            s_held_next = now + MENU_REPEAT_INTERVAL_US;
+            *nk = s_held_nk;
+            *dn = 1;
+            return true;
+        }
+    }
+    return false;
 }
 extern "C" int  lcd_get_scale_mode(void);        // lcd_st7789.cpp
 extern "C" void lcd_set_scale_mode(int m);
@@ -134,17 +173,23 @@ static inline bool key_is_up(uint8_t nk)   { return nk == NK_UP   || nk == NK_KP
 static inline bool key_is_down(uint8_t nk) { return nk == NK_DOWN || nk == NK_KP2; }
 static inline bool key_is_left(uint8_t nk)  { return nk == NK_LEFT  || nk == NK_KP4; }
 static inline bool key_is_right(uint8_t nk) { return nk == NK_RIGHT || nk == NK_KP6; }
+static inline bool key_repeats(uint8_t nk) {
+    return key_is_up(nk) || key_is_down(nk) || key_is_left(nk) || key_is_right(nk);
+}
 
 // RGB565 colors (same values as TFT_eSPI's TFT_* macros)
 #define COL_WHITE  0xFFFF
 #define COL_BLACK  0x0000
 #define COL_YELLOW 0xFFE0
 
-#define MAX_ENTRIES 24
+// Room for a card full of images: past this many the rest are simply not
+// listed, which looks like files going missing. Kept in PSRAM - 16KB is
+// nothing there and a lot in internal RAM.
+#define MAX_ENTRIES 256
 #define NAME_LEN    64
 #define VISIBLE     20               // rows below the title
 
-static char s_names[MAX_ENTRIES][NAME_LEN];
+EXT_RAM_BSS_ATTR static char s_names[MAX_ENTRIES][NAME_LEN];
 static int  s_count;
 
 #define ROMNAME_LEN 40             // main.cpp sizes the buffers to match
@@ -152,14 +197,14 @@ extern "C" char g_bios_file[ROMNAME_LEN];   // "" = the built-in default
 extern "C" char g_font_file[ROMNAME_LEN];
 static void save_settings(void);   // defined below; used by the HDD-eject reboot
 extern "C" void usb_msc_request(int mode);  // usb_msc.cpp: arm the USB Mode boot flag
-extern "C" bool gw_probe(void);             // gw_mode.cpp: Greaseweazle on the USB-A port
+extern "C" bool gw_probe(void);
 extern "C" bool screenshot_save(char *name, size_t cap);  // screenshot.cpp
 extern "C" void sd_unmount(void);           // sd_tab5.cpp: leave the card idle
-extern "C" bool fdd_gw_live_mount(int drv); // fdd_gw_live.cpp: the disk in the real drive
+extern "C" bool fdd_gw_live_mount(int drv);
 extern "C" bool fdd_gw_live_mounted(int drv);
 extern "C" bool fdd_gw_live_info(int drv, int *cyls, int *spt, int *secsize);
-extern "C" const char *gw_live_serial(int unit);  // gw_mode.cpp: which device it is
-extern "C" int gw_live_port(int unit);            // ...and which hub socket it is in
+extern "C" const char *gw_live_serial(int unit);
+extern "C" int gw_live_port(int unit);
 // The full-screen modes indent their text to where the menu rows start.
 #define MODE_INDENT "  "
 
@@ -172,9 +217,6 @@ static const char *drv_label(int d) {
 
 static const char *drv_current(int d) {
     if (d == 2) return np2cfg.sasihdd[0][0] ? (const char *)np2cfg.sasihdd[0] : "(empty)";
-    // A live drive has no file behind it, so np2cfg.fddfile[] is empty and the
-    // row would say "(empty)" however well the mount had gone. Ask the backend
-    // instead.
     if (fdd_gw_live_mounted(d)) {
         static char live[2][64];
         const char *sn = (d >= 0 && d < 2) ? gw_live_serial(d) : "";
@@ -217,7 +259,7 @@ static void draw_drives(int sel) {
         snprintf(line, sizeof(line), "%s Create New Disk", sel == 3 ? ">" : " ");
         lcd_menu_line(5, line, sel == 3 ? COL_BLACK : COL_WHITE,
                       sel == 3 ? COL_YELLOW : COL_BLACK);
-        snprintf(line, sizeof(line), "%s CPU clock: x%u%s",
+        snprintf(line, sizeof(line), "%s CPU Clock: x%u%s",
                  sel == 4 ? ">" : " ", (unsigned)np2cfg.multiple,
                  sel == 4 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(6, line, sel == 4 ? COL_BLACK : COL_WHITE,
@@ -225,7 +267,7 @@ static void draw_drives(int sel) {
         // Read at boot, so a change waits for RESET - and says so.
         snprintf(line, sizeof(line), "%s CPU: %s%s", sel == 5 ? ">" : " ",
                  cpu_name(g_cpu_mode),
-                 g_cpu_mode != g_cpu_mode_boot ? "   (RESET to apply)"
+                 g_cpu_mode != g_cpu_mode_boot ? "   (Reset to apply)"
                  : sel == 5 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(7, line, sel == 5 ? COL_BLACK : COL_WHITE,
                       sel == 5 ? COL_YELLOW : COL_BLACK);
@@ -251,27 +293,45 @@ static void draw_drives(int sel) {
                  audio_get_volume(), sel == 9 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(11, line, sel == 9 ? COL_BLACK : COL_WHITE,
                       sel == 9 ? COL_YELLOW : COL_BLACK);
-        // The last file written, so the row itself is the confirmation - a
-        // screenshot needs no screen of its own to report one line.
-        snprintf(line, sizeof(line), "%s Screenshot: %s", sel == 10 ? ">" : " ",
-                 s_last_shot[0] ? s_last_shot : "save the screen as PNG");
+        // How a 200-line screen's missing lines are drawn (main.cpp).
+        static const char *const l200[] = {"Original", "Doubled", "Interpolated"};
+        snprintf(line, sizeof(line), "%s 200-Line Graphics: %s%s", sel == 10 ? ">" : " ",
+                 l200[(g_line200 >= 0 && g_line200 <= 2) ? g_line200 : 0],
+                 sel == 10 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(12, line, sel == 10 ? COL_BLACK : COL_WHITE,
                       sel == 10 ? COL_YELLOW : COL_BLACK);
-        // Reboot into the SD card reader (usb_msc.cpp). One-shot: the flag is
-        // consumed at boot, so replugging USB comes back as the emulator.
-        snprintf(line, sizeof(line), "%s SD Card Reader Mode", sel == 11 ? ">" : " ");
+        // A colouring for the sound on its way out (audio_codec.cpp).
+        static const char *const sfx[] = {"Original", "Warm", "Hall"};
+        snprintf(line, sizeof(line), "%s FM Sound: %s%s", sel == 11 ? ">" : " ",
+                 sfx[audio_get_fx()], sel == 11 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(13, line, sel == 11 ? COL_BLACK : COL_WHITE,
                       sel == 11 ? COL_YELLOW : COL_BLACK);
-        // One level down from the row above: instead of the card, the PC gets
-        // the DOS volume inside a mounted disk image (the drive is asked next).
-        snprintf(line, sizeof(line), "%s Disk Image Reader Mode", sel == 12 ? ">" : " ");
+        // The FDD1 / FDD2 / HDD lamps under the picture (lcd_mipi.cpp).
+        snprintf(line, sizeof(line), "%s Drive Lamps: %s%s", sel == 12 ? ">" : " ",
+                 lcd_lamps_enabled() ? "ON" : "OFF", sel == 12 ? "   (LEFT/RIGHT or RET)" : "");
         lcd_menu_line(14, line, sel == 12 ? COL_BLACK : COL_WHITE,
                       sel == 12 ? COL_YELLOW : COL_BLACK);
-        // Last, where an action that throws the machine away belongs - not in
-        // the middle of the settings, a keypress away from the volume.
-        snprintf(line, sizeof(line), "%s RESET (save & reboot)", sel == 13 ? ">" : " ");
+        // The last file written, so the row itself is the confirmation - a
+        // screenshot needs no screen of its own to report one line.
+        snprintf(line, sizeof(line), "%s Screenshot: %s", sel == 13 ? ">" : " ",
+                 s_last_shot[0] ? s_last_shot : "save the screen as PNG");
         lcd_menu_line(15, line, sel == 13 ? COL_BLACK : COL_WHITE,
                       sel == 13 ? COL_YELLOW : COL_BLACK);
+        // Reboot into the SD card reader (usb_msc.cpp). One-shot: the flag is
+        // consumed at boot, so replugging USB comes back as the emulator.
+        snprintf(line, sizeof(line), "%s SD Card Reader Mode", sel == 14 ? ">" : " ");
+        lcd_menu_line(16, line, sel == 14 ? COL_BLACK : COL_WHITE,
+                      sel == 14 ? COL_YELLOW : COL_BLACK);
+        // One level down from the row above: instead of the card, the PC gets
+        // the DOS volume inside a mounted disk image (the drive is asked next).
+        snprintf(line, sizeof(line), "%s Disk Image Reader Mode", sel == 15 ? ">" : " ");
+        lcd_menu_line(17, line, sel == 15 ? COL_BLACK : COL_WHITE,
+                      sel == 15 ? COL_YELLOW : COL_BLACK);
+        // Last, where an action that throws the machine away belongs - not in
+        // the middle of the settings, a keypress away from the volume.
+        snprintf(line, sizeof(line), "%s Reset (save & reboot)", sel == 16 ? ">" : " ");
+        lcd_menu_line(18, line, sel == 16 ? COL_BLACK : COL_WHITE,
+                      sel == 16 ? COL_YELLOW : COL_BLACK);
     }
 }
 
@@ -347,7 +407,7 @@ static void browse_rom(int which) {
     int sel = 0, top = 0;
     for (;;) {
         char hdr[64];
-        snprintf(hdr, sizeof(hdr), "  select %s ROM (needs RESET)", prefix);
+        snprintf(hdr, sizeof(hdr), "  select %s ROM (needs Reset)", prefix);
         lcd_menu_line(0, hdr, COL_YELLOW, COL_BLACK);
         for (int r = 0; r < VISIBLE; r++) {
             int idx = top + r;
@@ -384,8 +444,6 @@ static void browse_rom(int which) {
     }
 }
 
-// Only a floppy drive can hold a physical disk, and only when a Greaseweazle
-// is actually plugged in - offering the row otherwise would be a dead end.
 static int live_rows(int drive) {
     return (drive < 2) ? 1 : 0;
 }
@@ -396,10 +454,6 @@ static void draw_files(int drive, int sel, int top) {
     // rebooting, so the machine comes back up in N88-BASIC / a floppy instead of
     // having the booted disk yanked out from under the OS.
     const char *ejlabel = (drive == 2) ? "(eject HDD & reboot)" : "(eject / empty)";
-    // Floppy drives get one more row than there are files: the disk physically
-    // in the drive attached to the Greaseweazle. It belongs in this list rather
-    // than on a menu row of its own, because from the machine's point of view
-    // it is simply another thing FDD1 can have in it.
     const int extra = live_rows(drive);
     for (int r = 0; r < VISIBLE; r++) {
         int idx = top + r;
@@ -412,8 +466,6 @@ static void draw_files(int drive, int sel, int top) {
         lcd_menu_line(2 + r, line, idx == sel ? COL_BLACK : COL_WHITE,
                       idx == sel ? COL_YELLOW : COL_BLACK);
     }
-    // s_count entries, the eject row, and on a floppy drive the live row;
-    // blank whatever is left below them.
     const int used = (s_count + 1 + extra) - top;
     if (used < VISIBLE) {
         lcd_menu_blank_rows(2 + (used < 0 ? 0 : used), 2 + VISIBLE - 1);
@@ -436,7 +488,7 @@ static void apply_image(int drive, const char *path) {
 static void browse(int drive) {
     scan_images(drive);
     const int extra = live_rows(drive);
-    int total = s_count + 1 + extra;               // +1 eject, +1 the physical drive
+    int total = s_count + 1 + extra;
     lcd_menu_clear();                             // leave the drive list cleanly (no overlap)
     if (total == 0) {
         lcd_menu_line(2, "  no images on SD", COL_WHITE, COL_BLACK);
@@ -455,7 +507,7 @@ static void browse(int drive) {
         if (sel < top) top = sel;
         if (sel >= top + VISIBLE) top = sel - VISIBLE + 1;
         if (nk == NK_RET) {
-            if (sel == s_count + 1 && extra) {    // the disk in the real drive
+            if (sel == s_count + 1 && extra) {
                 lcd_menu_clear();
                 lcd_menu_line(0, "  GreaseWeazle", COL_YELLOW, COL_BLACK);
                 lcd_menu_line(2, "  Reading the disk in the drive. It stays in the",
@@ -692,6 +744,9 @@ static void save_settings(void) {
         nvs_set_u8(nh, "scaler", (uint8_t)lcd_get_scale_mode());
         nvs_set_u8(nh, "backlight", (uint8_t)g_backlight_pct);
         nvs_set_u8(nh, "volume", (uint8_t)audio_get_volume());
+        nvs_set_u8(nh, "line200", (uint8_t)g_line200);
+        nvs_set_u8(nh, "soundfx", (uint8_t)audio_get_fx());
+        nvs_set_u8(nh, "lamps", lcd_lamps_enabled() ? 1 : 0);
         nvs_set_str(nh, "biosfile", g_bios_file);
         nvs_set_str(nh, "fontfile", g_font_file);
         // Current mounts (empty drive => empty string; restored as empty at boot).
@@ -706,7 +761,7 @@ static void save_settings(void) {
 // Disk Image Reader Mode: which drive's image to hand the PC. Returns the drive
 // (0 = FDD1, 1 = FDD2, 2 = HDD) or -1 on ESC, and leaves the choice in NVS for
 // usb_image.cpp to read after the reboot. Only a drive with an image file in it
-// can be chosen; a Greaseweazle drive has no file behind it.
+// can be chosen.
 static int choose_image_drive(void) {
     static const int order[3] = { 2, 0, 1 };      // HDD first, as it always was
     auto usable = [](int d) {
@@ -756,7 +811,7 @@ extern "C" void menu_disk_run(void) {
         if (!dn) continue;
         if (nk == NK_ESC) break;
         if (key_is_up(nk)   && sel > 0) sel--;
-        if (key_is_down(nk) && sel < 13) sel++;
+        if (key_is_down(nk) && sel < 16) sel++;
         // Left/right adjust the rows that hold a value rather than doing
         // something; everywhere else they are ignored.
         {
@@ -767,6 +822,19 @@ extern "C" void menu_disk_run(void) {
                     tab5_backlight_set(g_backlight_pct);
                 } else if (sel == 9) {
                     audio_set_volume(level_step(audio_get_volume(), dir, false));
+                } else if (sel == 10) {
+                    const int m = g_line200 + dir;
+                    if (m >= 0 && m <= 2) {
+                        line200_apply(m);
+                        line200_refresh();
+                    }
+                } else if (sel == 12) {
+                    lcd_lamps_enable(dir > 0);
+                } else if (sel == 11) {
+                    const int m = audio_get_fx() + dir;
+                    if (m >= 0 && m <= 2) {
+                        audio_set_fx(m);
+                    }
                 } else if (sel == 4) {
                     const UINT mult = clock_step(np2cfg.multiple, dir, false);
                     np2cfg.multiple = mult;       // display follows immediately
@@ -797,12 +865,19 @@ extern "C" void menu_disk_run(void) {
                 tab5_backlight_set(g_backlight_pct);
             } else if (sel == 9) {              // Volume: next, wrapping
                 audio_set_volume(level_step(audio_get_volume(), 1, true));
-            } else if (sel == 10) {              // Screenshot
+            } else if (sel == 10) {              // 200-line graphics: next, wrapping
+                line200_apply((g_line200 + 1) % 3);
+                line200_refresh();
+            } else if (sel == 11) {              // Sound: next, wrapping
+                audio_set_fx((audio_get_fx() + 1) % 3);
+            } else if (sel == 12) {              // Drive lamps: on/off
+                lcd_lamps_enable(!lcd_lamps_enabled());
+            } else if (sel == 13) {              // Screenshot
                 if (!screenshot_save(s_last_shot, sizeof(s_last_shot))) {
                     snprintf(s_last_shot, sizeof(s_last_shot), "FAILED");
                 }
-            } else if (sel == 11 || sel == 12) {   // USB Mode: arm the flag, reboot
-                const int m = (sel == 11) ? USB_MODE_SD : USB_MODE_IMAGE;
+            } else if (sel == 14 || sel == 15) {   // USB Mode: arm the flag, reboot
+                const int m = (sel == 14) ? USB_MODE_SD : USB_MODE_IMAGE;
                 if (m == USB_MODE_IMAGE && choose_image_drive() < 0) {
                     lcd_menu_clear();   // back to the menu
                     draw_drives(sel);
@@ -829,7 +904,7 @@ extern "C" void menu_disk_run(void) {
                 sd_unmount();
                 panel_tab5_blank_early();
                 esp_restart();
-            } else if (sel == 13) {             // RESET: persist the settings, reboot
+            } else if (sel == 16) {             // RESET: persist the settings, reboot
                 save_settings();
                 sd_unmount();                   // same reason as USB Mode above
                 panel_tab5_blank_early();

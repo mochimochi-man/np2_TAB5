@@ -119,7 +119,7 @@ static void IOOUTCALL pcm86_oa468(UINT port, REG8 val) {
 			g_pcm86.lastclockforwait = CPU_CLOCK + CPU_BASECLOCK - CPU_REMCLOCK;
 		}
 	}
-	// 割り込み条件を満たしていれば強制的に割り込む　ポリスノーツ用
+	// 割り込み条件を満たしていれば強制的に割り込む
 	if (g_pcm86.virbuf <= g_pcm86.fifosize)
 	{
 		g_pcm86.irqflag = 1;

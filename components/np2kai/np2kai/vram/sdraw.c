@@ -14,6 +14,14 @@ BOOL	bVFImport;
 
 #if !defined(NP2_SIZE_QVGA) || defined(SIZE_VGATEST)
 
+/* How the lines a 200-line screen leaves out are drawn: 0 as the machine draws
+   them, from np2cfg.skipline/skiplight; 1 (interpolate) each one halfway
+   between the graphics line above it and the one below. Text is drawn at its
+   own 400 lines either way. */
+int sdraw_interp200;
+#define	SDRAW_LINES		400
+
+
 #if defined(SUPPORT_VIDEOFILTER)
 /* Fast inline VF pixel write per BPP. Reads pre-filtered RGB from sdraw->vfDest
  * directly instead of paying VideoFilter_PutDest()'s per-call overhead.
@@ -40,8 +48,10 @@ BOOL	bVFImport;
 #if defined(SUPPORT_8BPP)
 #define	SDSYM(sym)				sdraw8##sym
 #define	SDSETPIXEL(ptr, pal)	*(ptr) = (pal) + START_PAL
+#define	SDAVGPIXEL(ptr, a, b)	SDSETPIXEL(ptr, a)
 #define	VFPUTPIXEL(ptr, x, y)	VFPUTPIXEL_8(ptr, x, y)
 #include	"sdraw.mcr"
+#undef	SDAVGPIXEL
 #undef	SDSYM
 #undef	SDSETPIXEL
 #undef	VFPUTPIXEL
@@ -50,6 +60,8 @@ BOOL	bVFImport;
 #if defined(SUPPORT_16BPP)
 #define	SDSYM(sym)				sdraw16##sym
 #define	SDSETPIXEL(ptr, pal)	*(UINT16 *)(ptr) = np2_pal16[(pal)]
+/* RGB565, each channel the mean of the two, rounded down */
+#define	SDAVGPIXEL(ptr, a, b)	do {												const UINT16 _ca = np2_pal16[(a)];											const UINT16 _cb = np2_pal16[(b)];											*(UINT16 *)(ptr) = (UINT16)(((_ca & 0xf7de) >> 1) +													((_cb & 0xf7de) >> 1) + (_ca & _cb & 0x0821));		} while (0)
 #define	VFPUTPIXEL(ptr, x, y)	VFPUTPIXEL_16(ptr, x, y)
 #include	"sdraw.mcr"
 #include	"sdrawex.mcr"
@@ -63,6 +75,7 @@ BOOL	bVFImport;
 #define	SDSETPIXEL(ptr, pal)	(ptr)[RGB24_R] = np2_pal32[(pal)].p.r;	\
 								(ptr)[RGB24_G] = np2_pal32[(pal)].p.g;	\
 								(ptr)[RGB24_B] = np2_pal32[(pal)].p.b
+#define	SDAVGPIXEL(ptr, a, b)	SDSETPIXEL(ptr, a)
 #define	VFPUTPIXEL(ptr, x, y)	VFPUTPIXEL_24(ptr, x, y)
 #include	"sdraw.mcr"
 #include	"sdrawex.mcr"
@@ -74,6 +87,7 @@ BOOL	bVFImport;
 #if defined(SUPPORT_32BPP)
 #define	SDSYM(sym)				sdraw32##sym
 #define	SDSETPIXEL(ptr, pal)	*(UINT32 *)(ptr) = np2_pal32[(pal)].d
+#define	SDAVGPIXEL(ptr, a, b)	SDSETPIXEL(ptr, a)
 #define	VFPUTPIXEL(ptr, x, y)	VFPUTPIXEL_32(ptr, x, y)
 #include	"sdraw.mcr"
 #include	"sdrawex.mcr"

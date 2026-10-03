@@ -638,7 +638,25 @@ void opngen_keyon(OPNGEN opngen, UINT chnum, REG8 value)
 				}
 				slot->env_mode = EM_ATTACK;
 				slot->env_inc = slot->env_inc_attack;
-				slot->env_cnt = EC_ATTACK;
+				/* The chip starts the attack from wherever the envelope is.
+				   A note still releasing when the next key-on comes is not
+				   cut to silence first - doing that dropped it out in one
+				   sample, and every retriggered note clicked. Start at the
+				   point on the attack curve that is as loud as it is now. */
+				{
+					UINT32 start = EC_ATTACK;
+					if ((slot->env_cnt >= EC_DECAY) && (slot->env_cnt < EC_OFF))
+					{
+						const SINT32 att = (SINT32)((slot->env_cnt - EC_DECAY) >> ENV_BITS);
+						UINT32 k = 0;
+						while ((k < (UINT32)(EVC_ENT - 1)) && (opncfg.envcurve[k] > att))
+						{
+							k++;
+						}
+						start = k << ENV_BITS;
+					}
+					slot->env_cnt = start;
+				}
 				slot->env_end = EC_DECAY;
 			}
 		}

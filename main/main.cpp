@@ -31,6 +31,9 @@ extern "C" {
 #include <cbus/smpu98.h>
 #include <io/serial.h>
 #include <io/gdc.h>
+#include <vram/palettes.h>
+#include <vram/scrndraw.h>
+extern int sdraw_interp200;        // vram/sdraw.c
 void mouseif_changeclock(void);   // io/mouseif.h has a C/C++ typedef clash; declared here instead
 #include <cpucore.h>
               // CPU_CLOCK/BASECLOCK/REMCLOCK (emulated cycle counter)
@@ -58,17 +61,17 @@ void usb_kbd_init(void);           // usb_kbd.cpp: USB HID keyboard host
 // through the companion ESP32-C6 over esp-hosted — a later phase.
 int  usb_msc_boot_flag_take(void); // usb_msc.cpp: read+clear the USB Mode request (0 = none)
 void usb_msc_report_last(void);    // usb_msc.cpp: how far the last USB Mode attempt got
-void gw_live_keepalive(void);       // gw_mode.cpp: keep a mounted drive turning
-void fdd_gw_live_tick(void);        // fdd_gw_live.cpp: report a swapped disk
-void fdd_gw_live_started(void);     // ...and when to start doing so
-void fdd_gw_live_menu_opened(void); // ...and that opening the menu means a swap
+void gw_live_keepalive(void);
+void fdd_gw_live_tick(void);
+void fdd_gw_live_started(void);
+void fdd_gw_live_menu_opened(void);
 void panel_tab5_blank_early(void);  // panel_tab5.cpp: kill the backlight and the panel rail
 void usb_msc_restore_phy_map(void);  // usb_msc.cpp: undo USB Mode's PHY swap
 void tab5_backlight_set(int percent);   // panel_tab5.cpp
 bool touch_mouse_init(void);            // touch_mouse.cpp: touch panel as the mouse
 void bt_hid_init(void);                 // bt_hid.cpp: BLE HID host via the ESP32-C6
-bool gw_probe(void);                    // gw_mode.cpp: Greaseweazle on the USB-A port
-bool fdd_gw_live_mount(int drv);        // fdd_gw_live.cpp: the disk in the real drive
+bool gw_probe(void);
+bool fdd_gw_live_mount(int drv);
 bool fdd_gw_live_is_mark(const char *name);
 void rtc_tab5_sync(void);               // rtc_tab5.cpp: the RX8130CE clock
 void audio_set_volume(int percent);     // audio_codec.cpp
@@ -76,6 +79,35 @@ void audio_set_volume(int percent);     // audio_codec.cpp
 // Backlight percentage, shared with the menu row that changes it. Restored
 // from NVS at boot, applied once the panel is up.
 extern "C" int g_backlight_pct = 100;
+
+// How the lines a 200-line screen leaves out are drawn, from the menu:
+//   0  black, as the machine shows them (scanlines)
+//   1  each graphics line drawn twice
+//   2  each missing line halfway between the graphics line above and below
+// Text has 400 lines of its own and is drawn at them in all three. np2kai
+// already knew how to draw the second (skipline, at full brightness); the
+// third is in vram/sdraw.mcr.
+extern "C" void lcd_lamps_tick(void);    // lcd_mipi.cpp
+extern "C" void lcd_lamps_enable(bool on);
+extern "C" int g_line200 = 0;
+extern "C" void audio_set_fx(int mode);   // audio_codec.cpp
+
+extern "C" void line200_apply(int m) {
+    g_line200 = (m >= 0 && m <= 2) ? m : 0;
+    np2cfg.skipline = (g_line200 != 0) ? 1 : 0;
+    if (g_line200 != 0) {
+        np2cfg.skiplight = 255;
+    }
+    sdraw_interp200 = (g_line200 == 2);
+}
+
+// After a change while the machine is up: the palettes the skipped lines are
+// drawn with, and the whole screen again.
+extern "C" void line200_refresh(void) {
+    pal_makeskiptable();
+    pal_change(1);
+    scrndraw_redraw();
+}
 // CPU chosen in the menu: 0 = V30, 1 = 80286, 2 = 80286 + 386 instructions. Read
 // once at boot - the menu shows a change as pending until RESET.
 extern "C" int g_cpu_mode = 2;
@@ -329,10 +361,6 @@ static void emu_task(void *arg) {
     // come after sd_mount(), because this is also what reads SETTIME.TXT.
     rtc_tab5_sync();
 
-    // --- Greaseweazle, if one is plugged into the USB-A port ---
-    // Just say whether one is there; reading a disk is a menu action now
-    // (GreaseWeazle Mode), which is where the progress can go on screen.
-    // Harmless when nothing is connected - it says so and carries on.
     gw_probe();
 
     // --- Touch panel as the PC-98 mouse ---
@@ -344,8 +372,7 @@ static void emu_task(void *arg) {
     pccore_setdefault();
     milstr_ncpy(np2cfg.model, "VX", sizeof(np2cfg.model));   // PC-9801VX (80286: XMS/HIMEM capable)
     // The VX has an EGC, and the default here (2) left it out. Software that
-    // copies VRAM with the EGC - the stage backgrounds in Touhou Fuumaroku -
-    // then drew solid blocks through the plain GRCG instead.
+    // copies VRAM with the EGC then drew solid blocks through the plain GRCG instead.
     np2cfg.grcg = 3;
     // Emulated V30 @ ~4.92MHz = base 2.4576MHz x2. x4 (authentic VM21 9.83MHz)
     // left the i286c core at ~17ms/frame with ZERO graphics — borderline for
@@ -477,6 +504,12 @@ static void emu_task(void *arg) {
                 np2cfg.multiple = v;
             if (nvs_get_u8(nh, "scaler", &v) == ESP_OK && v < lcd_scale_mode_count())
                 lcd_set_scale_mode(v);
+            if (nvs_get_u8(nh, "line200", &v) == ESP_OK && v <= 2)
+                line200_apply(v);
+            if (nvs_get_u8(nh, "soundfx", &v) == ESP_OK && v <= 2)
+                audio_set_fx(v);
+            if (nvs_get_u8(nh, "lamps", &v) == ESP_OK)
+                lcd_lamps_enable(v != 0);
             size_t len;
             len = sizeof(saved_hdd);
             if (nvs_get_str(nh, "hdd",  saved_hdd,  &len) == ESP_OK) have_nvs_disks = true;
@@ -565,8 +598,6 @@ static void emu_task(void *arg) {
     //     Mount each saved floppy whose file exists; with no NVS disk data both
     //     drives stay empty and the BIOS drops to N88-BASIC. ---
     if (have_nvs_disks) {
-        // A drive that was left holding the physical disk is put back the same
-        // way a file is, so the machine can be booted from a real floppy.
         if (fdd_gw_live_is_mark(saved_fdd0)) {
             fdd_gw_live_mount(0);
         } else if (saved_fdd0[0] && sd_file_exists(saved_fdd0)) {
@@ -592,7 +623,7 @@ static void emu_task(void *arg) {
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
     banner("running");
-    fdd_gw_live_started();   // start-up mounts are done; later ones are swaps
+    fdd_gw_live_started();
     printf("free after reset: internal=%u psram=%u largest_psram=%u\n",
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
@@ -661,8 +692,6 @@ static void emu_task(void *arg) {
             rt_prevcyc = (uint32_t)(CPU_CLOCK + CPU_BASECLOCK - CPU_REMCLOCK);
         }
 
-        // Physical drives stop spinning if nothing asks them for anything,
-        // and a game waiting at a prompt asks for nothing for minutes.
         gw_live_keepalive();
         fdd_gw_live_tick();
 
@@ -731,6 +760,7 @@ static void emu_task(void *arg) {
         else        { acc_exec += (b - a); n_exec++; }
 
         total++;
+        lcd_lamps_tick();                // the drive lamps beside the picture
 
         // Emulated CPU cycles executed this frame (unsigned delta is wrap-safe;
         // clamp resets/garbage to ~one frame). Shared by FM drain + throttle.
@@ -745,7 +775,14 @@ static void emu_task(void *arg) {
         {
             int64_t s0 = esp_timer_get_time();
             snd_owed += (int64_t)dcyc * FM_RATE / rt_hz;
-            for (int guard = 0; snd_owed >= g_fm_frames && guard < 8; guard++) {
+            // ...and also whenever the chips have rendered more than a block
+            // ahead of that. They run at their own idea of 22050Hz, a little
+            // faster than this count; the difference piled up in np2kai's
+            // stream until it overflowed, and the samples it threw away were
+            // a click each time. snd_owed goes negative and evens it out.
+            for (int guard = 0;
+                 (snd_owed >= g_fm_frames || sound_pending() >= (UINT)(2 * g_fm_frames)) && guard < 8;
+                 guard++) {
                 const SINT32 *pcm = sound_pcmlock();
                 if (!pcm) break;
                 audio_write_s32((const int32_t *)pcm, g_fm_frames);

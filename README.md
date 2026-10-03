@@ -53,7 +53,7 @@ Bluetooth is off while this mode runs; tap the screen to leave it.
 
 ### 386 instructions
 
-With **CPU: 80286 + 386 instructions** in the menu (the default), real-mode
+With **CPU: 80286 + 386 Instructions** in the menu (the default), real-mode
 software that uses 386 instructions runs. Protected mode is not supported, and
 the machine still identifies itself as a 286.
 
@@ -63,9 +63,29 @@ Mounts the disk sitting in a real drive, through a GreaseWeazle plugged into the
 Tab5's USB-A port. See
 [GreaseWeazle mode](#greaseweazle-mode-1) under *Running it* for the details.
 
+### 200-line graphics
+
+How the lines a 200-line screen leaves out are drawn, from the menu
+(**200-Line Graphics**): **Original**, **Doubled** or **Interpolated**. Text is
+drawn at its own 400 lines in all three, and 400-line software is not affected.
+
+### FM Sound
+
+**Original**, **Warm** (softer top, fuller bottom) or **Hall** (warm, with a
+small stereo reverb), from the menu.
+
+### Drive lamps
+
+FDD1, FDD2 (red) and HDD (green) access lamps under the picture. They can be
+turned off in the menu (**Drive Lamps**).
+
 ---
 
 ## 2. Building
+
+> **Just want to run it?** There is no need to build anything. Download
+> **M5Burner** from the M5Stack website, find **np2 TAB5** in its firmware list
+> for TAB5, and write it from there - that is by far the easiest way.
 
 ### (1) Build
 
@@ -148,7 +168,7 @@ compatible BIOS starts.
 
 **F11, F12 or Pause** opens the built-in menu.
 
-Choose disk images for FDD1 / FDD2 / HDD, then leave the menu with **RESET**: the
+Choose disk images for FDD1 / FDD2 / HDD, then leave the menu with **Reset**: the
 machine reboots with those images mounted.
 
 If you have a `BIOS.ROM` or `FONT.ROM` dumped from real hardware, put it in the
@@ -176,7 +196,6 @@ from the menu.
   hub**.
 - **Power the drives separately.** A 5-inch drive needs its own supply.
 - After changing a disk, open the menu once and the machine picks up the change.
-- **Copy-protected disks are not supported.**
 
 Set the jumpers on a drive connected to a GreaseWeazle as below. Where there is
 more than one drive, set them all the same.

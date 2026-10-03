@@ -835,8 +835,8 @@ static void load_builtin_font(void) {
     }
 }
 
-// The three full-screen modes - this one, the disk image reader and
-// GreaseWeazle Mode - are laid out the same way as the menu's own submenus, so
+// The full-screen modes - this one and the disk image reader - are laid out
+// the same way as the menu's own submenus, so
 // that picking a row and landing on its screen does not look like arriving
 // somewhere else:
 //
@@ -1078,11 +1078,6 @@ extern "C" void usb_msc_run(int mode) {
     // moment a host enumerated. ESP-IDF keeps one USB PHY driver and this code
     // cannot assume the host side may be installed while the device side owns a
     // PHY.
-    //
-    // What it costs is worth knowing: the host stack grew when hub support was
-    // compiled in for the GreaseWeazle, and USB Mode pays for that without
-    // using it. This is the figure to decide on if the keyboard host ever has
-    // to be skipped the way Bluetooth already is.
     usb_msc_log("usb_msc: internal free before kbd=%u largest_dma=%u\n",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_largest_free_block(

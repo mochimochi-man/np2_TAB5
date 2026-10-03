@@ -15,6 +15,12 @@
 // The mount point has to be "/sd" because dosio_sd.cpp opens every image
 // through that prefix; it comes from CONFIG_BSP_SD_MOUNT_POINT in
 // sdkconfig.defaults rather than being passed in here.
+//
+// The one thing passed in is the mount config, for its file limit. The BSP's
+// own allows five open files, and a running machine holds most of them - the
+// hard disk image, the ROMs, and a file per floppy drive. Host, slot and the
+// LDO are still left to the BSP, which fills them in because they are left
+// empty.
 
 #include <string.h>
 
@@ -34,16 +40,26 @@ extern "C" void sd_unmount(void) {
     bsp_sdcard_unmount();
 }
 
+static esp_err_t mount_card(void) {
+    static esp_vfs_fat_sdmmc_mount_config_t mount;
+    mount.format_if_mount_failed = false;
+    mount.max_files = 12;
+    mount.allocation_unit_size = 16 * 1024;
+    bsp_sdcard_cfg_t cfg = {};
+    cfg.mount = &mount;
+    return bsp_sdcard_sdmmc_mount(&cfg);
+}
+
 extern "C" bool sd_mount(void) {
     // Two goes, for the same reason: if the card was left busy by a previous
     // life it will not answer the first time, and by the second it has timed
     // out whatever it was doing.
-    esp_err_t err = bsp_sdcard_mount();
+    esp_err_t err = mount_card();
     if (err != ESP_OK) {
         ets_printf("sd: mount failed: 0x%x, retrying\n", (unsigned)err);
         bsp_sdcard_unmount();
         vTaskDelay(pdMS_TO_TICKS(150));
-        err = bsp_sdcard_mount();
+        err = mount_card();
     }
     if (err != ESP_OK) {
         ets_printf("sd: mount failed: 0x%x\n", (unsigned)err);

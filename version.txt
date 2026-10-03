@@ -1,6 +1,15 @@
 np2 TAB5
 
 
+1.3.0   2026-10-03
+
+  - Added: 200-Line Graphics Effect, FM Sound Effect and Show Drive Lamps in the menu.
+  - Improved: GreaseWeazle Drive.
+  - Improved: Disk Read Speed.
+  - Improved: hold an arrow key to move through the menu, and more disk images are listed.
+  - Fixed: FM Sound Stability.
+
+
 1.2.1   2026-09-30
 
   - Changed: the default CPU clock is x3.

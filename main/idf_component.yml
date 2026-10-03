@@ -32,7 +32,6 @@ dependencies:
   # RPC 3.x uses to start its BT controller. See bt_hid.cpp.
   espressif/esp_hosted: "~2.12"
   espressif/esp_wifi_remote: "*"
-  # Greaseweazle is a USB CDC-ACM device on the USB-A port (see gw_mode.cpp).
   espressif/usb_host_cdc_acm: "^2.4"
   # The other Tab5 panel. Pulled in by the BSP already, named here
   # because panel_tab5.cpp drives it directly (see bringup_st7123).

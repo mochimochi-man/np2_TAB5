@@ -492,6 +492,10 @@ static void IOOUTCALL gdc_o68(UINT port, REG8 dat) {
 		}
 		if (bit & (0x01 | 0x04 | 0x10)) {
 			gdcs.grphdisp |= GDCSCRN_ALLDRAW2;
+			if (bit == 0x10) {
+				/* the text background depends on it with skipline (palettes.c) */
+				gdcs.palchange = GDCSCRN_REDRAW;
+			}
 		}
 		else if (bit == 0x02) {
 			gdcs.grphdisp |= GDCSCRN_ALLDRAW2;

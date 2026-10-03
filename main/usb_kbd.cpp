@@ -236,8 +236,8 @@ static void usb_lib_task(void *arg) {
 
     // Run the port at full speed, on purpose.
     //
-    // There is one USB-A socket, so anything that wants a keyboard AND a
-    // GreaseWeazle at the same time needs a hub - and a hub is where this
+    // There is one USB-A socket, so anything that wants a keyboard AND another
+    // device at the same time needs a hub - and a hub is where this
     // falls apart. The socket is wired to the high-speed UTMI PHY, so a USB 2.0
     // hub enumerates at high speed, and a high-speed hub reaches the full- and
     // low-speed devices below it through a transaction translator. ESP-IDF's
@@ -251,7 +251,7 @@ static void usb_lib_task(void *arg) {
     // Setting FSLSSupp makes the core full-/low-speed only, so the hub itself
     // comes up as a full-speed device and there is no TT in the path at all.
     // The bit costs nothing here: everything this port is for - keyboards,
-    // mice, a GreaseWeazle - is full or low speed already, and USB Mode is a
+    // mice - is full or low speed already, and USB Mode is a
     // device-side stack on the OTHER PHY and is not affected.
     //
     // ESP-IDF has the accessor for this and never calls it

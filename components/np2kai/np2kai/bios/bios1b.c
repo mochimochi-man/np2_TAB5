@@ -144,6 +144,7 @@ enum {
 static void fdd_int(int result) {
 
   if (result == FDCBIOS_NORESULT) {
+    fdc_int_delay = 0;
     return;
   }
   switch (CPU_AH & 0x0f) {
@@ -159,6 +160,7 @@ static void fdd_int(int result) {
     break;
 
   default:
+    fdc_int_delay = 0;
     return;
   }
   //	kaiD
@@ -470,7 +472,7 @@ static REG8 fdd_operate(REG8 type, REG8 rpm, BOOL ndensity) {
     addr = ES_BASE + CPU_BP;
     if ((addr & 0xffff) > ((addr + size - 1) & 0xffff)) {
       ret_ah = 0x20;
-      result = FDCBIOS_WRITEERROR;
+      result = FDCBIOS_NORESULT; /* DMA boundary: the real BIOS returns before any FDC command, so there is no interrupt to wait for */
       break;
     }
     while (size) {
@@ -524,7 +526,7 @@ static REG8 fdd_operate(REG8 type, REG8 rpm, BOOL ndensity) {
     addr = ES_BASE + CPU_BP;
     if ((addr & 0xffff) > ((addr + size - 1) & 0xffff)) {
       ret_ah = 0x20;
-      result = FDCBIOS_READERROR;
+      result = FDCBIOS_NORESULT; /* DMA boundary: the real BIOS returns before any FDC command, so there is no interrupt to wait for */
       break;
     }
     if (fdd_diagread() == SUCCESS) {
@@ -580,7 +582,7 @@ static REG8 fdd_operate(REG8 type, REG8 rpm, BOOL ndensity) {
     addr = ES_BASE + CPU_BP;
     if ((addr & 0xffff) > ((addr + size - 1) & 0xffff)) {
       ret_ah = 0x20;
-      result = FDCBIOS_READERROR;
+      result = FDCBIOS_NORESULT; /* DMA boundary: the real BIOS returns before any FDC command, so there is no interrupt to wait for */
       break;
     }
     while (size) {
@@ -1018,6 +1020,39 @@ REG16 bootstrapload(void) {
 }
 
 // --------------------------------------------------------------------------
+
+BOOL bios0x1b_hold(void) {
+
+  REG8 drv;
+  UINT cyl;
+  REG8 hd;
+
+  if (!fdc_track_ready) {
+    return FALSE;
+  }
+  switch (CPU_AL & 0xf0) {
+  case 0x90: case 0x30: case 0xb0: case 0x10: case 0x70: case 0xf0: case 0x50:
+    break;
+  default:
+    return FALSE;
+  }
+  switch (CPU_AH & 0x0f) {
+  case 0x01: case 0x02: case 0x05: case 0x06: case 0x09: case 0x0a: case 0x0c:
+    break;
+  default:
+    return FALSE;
+  }
+  drv = CPU_AL & 0x03;
+  cyl = (CPU_AH & 0x10) ? CPU_CL : fdc.treg[drv];
+  hd = ((CPU_DH) ^ (CPU_AL >> 2)) & 1;
+  if (!fdc_track_ready(drv, cyl, hd)) {
+    return TRUE;
+  }
+  if ((CPU_AH & 0x80) && (!hd) && (!fdc_track_ready(drv, cyl, 1))) {
+    return TRUE;
+  }
+  return FALSE;
+}
 
 void bios0x1b(void) {
 

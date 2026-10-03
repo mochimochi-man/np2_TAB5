@@ -1,42 +1,16 @@
-// The floppies in the real drives, served to the emulator as they are read.
-//
-// np2kai reaches a disk through a table of function pointers, one per FDC
-// command (_FDDFUNC in diskimage/fddfile.h). Every existing backend fills that
-// table from a file. This one fills it from a physical disk, a track at a time,
-// through a Greaseweazle - one per drive, so an installer that asks for disk B
-// in drive 2 can be answered.
-//
-// WHY, rather than dumping to a file first: a disk image can only describe a
-// regular disk. .HDM is a bare array of sectors and .NFD a fixed table of them,
-// so a track carrying sectors the format has no room for - an R=240 of 2048
-// bytes, a data field whose CRC is wrong on purpose - loses exactly those
-// sectors when it is written out. They are what copy protection is made of, so
-// the image that results is the disk with its protection removed. Serving the
-// disk live writes nothing, drops nothing, and needs the original in the drive
-// to run, which is the same condition the real machine imposes.
-//
-// It works: a protected disk reads here as 19 sectors on cylinder 3 - eight
-// ordinary ones and eleven of 2048 bytes whose data CRC never checks out - and
-// the game accepts it and moves on.
-//
-// HOW IT PLUGS IN: fddfile[] and fddfunc[] have external linkage even though
-// only fddfile[] is declared in the header, so a backend can be installed from
-// outside np2kai without modifying it. Nothing in components/np2kai is touched.
-//
-// WHAT IT DOES NOT DO: weak bits (data that reads differently on each
-// revolution) and timing-based checks are not reproduced - a cached track has
-// one value per byte and no time axis. See gw_live.h.
-
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 #include <compiler.h>
 #include <pccore.h>
+#include <cpucore.h>
 #include <io/iocore.h>
 #include <diskimage/fddfile.h>
 
@@ -44,31 +18,17 @@
 
 extern "C" int ets_printf(const char *fmt, ...);
 
-// Declared here rather than in a header: fddfile.h exposes fddfile[] but not
-// fddfunc[], though both are file-scope with external linkage in fddfile.c.
 extern "C" _FDDFUNC fddfunc[MAX_FDDFILE];
+extern "C" void np2lamp_fdd(REG8 drv);
 
-// The name kept in np2cfg.fddfile[] for a live drive. It is not a path and
-// never can be - no file on the card starts with a colon - so every place that
-// tests whether the file exists correctly decides it does not, and the two
-// places that must not (the boot-time remount and the media check) look for
-// this string instead. Same trick, and same reason, as ":builtin/" for the ROMs.
 #define GW_LIVE_MARK ":gw/live"
 
-// ---- per-drive state -------------------------------------------------------
-#define GW_DRIVES    2            // FDD1 and FDD2, one Greaseweazle each
-#define GW_MAX_TRK   168          // 84 cylinders, two heads
+#define GW_DRIVES    2
+#define GW_MAX_TRK   168
 #define GW_MAX_SEC   32
 
-// A 2HD disk is about 1.26MB of sector data. Two megabytes leaves room for the
-// extra sectors a protected track carries (cylinder 3 above is 30KB rather than
-// 8KB) without ever needing to evict anything - which matters, because evicting
-// would mean re-reading, and a re-read costs half a second.
 #define GW_POOL      (2 * 1024 * 1024)
 
-// Two revolutions is enough when the disk is good; a track that comes back with
-// a bad CRC is read again, because a marginal sector often reads clean on the
-// third go. Four attempts is where that stops paying.
 #define GW_REVS      3
 #define GW_REVS_SLOW 5
 #define GW_TRIES     4
@@ -86,37 +46,23 @@ struct live_drv {
     bool      running;
     bool      mounted;
     int       cyls, spt, secsize;
-    uint32_t  rests;      // the drive's rest count when this cache was filled
+    uint32_t  rests;
 };
 
 static live_drv s_dr[GW_DRIVES];
 
-// See fdd_gw_live_tick(): the door-open pulse that tells the guest the disk
-// in a live drive may have been changed.
-static bool     s_machine_running;   // set once the emulator is past start-up
-static void door_opened(int drive);  // defined below, next to the pulse
+static bool     s_machine_running;
+static void door_opened(int drive);
 static uint32_t s_seen_rest[GW_DRIVES];
 static int      s_open_frames[GW_DRIVES];
 static OEMCHAR  s_hidden[GW_DRIVES];
 
-// One scratch track, shared. Captures land here first so that several of them
-// can be compared before anything is committed to a cache; only one drive is
-// ever being read at a time, because the emulator serialises floppy access
-// through the FDC.
 static uint8_t *s_scratch;
 
 static inline live_drv *drv_of(int d) {
     return (d >= 0 && d < GW_DRIVES) ? &s_dr[d] : nullptr;
 }
 
-// ---- loading ---------------------------------------------------------------
-// Merge one capture into what is already known about this track.
-//
-// A sector that failed its CRC is kept, but it is not the final word: read the
-// track again and the marginal ones often come back clean. A sector that is bad
-// on EVERY attempt is left bad, which is the right answer twice over - on a
-// worn disk it is the truth, and on a protected one the bad CRC is deliberate
-// and the guest is waiting to be told about it.
 static int merge_capture(const gw_sector_t *cap, int ncap,
                          gw_sector_t *best, int nbest, uint8_t *pool_base,
                          size_t pool_cap, size_t *pool_used_out) {
@@ -142,17 +88,18 @@ static int merge_capture(const gw_sector_t *cap, int ncap,
             memcpy(pool_base + best[slot].off, s_scratch + c->off, c->len);
             continue;
         }
-        // Already have it. Only a clean read displaces what is stored.
+
         if (c->data_ok && !best[slot].data_ok) {
             memcpy(pool_base + best[slot].off, s_scratch + c->off, c->len);
             best[slot].data_ok = 1;
             best[slot].deleted = c->deleted;
+            best[slot].no_data = 0;
+            best[slot].dam_gap = c->dam_gap;
         }
     }
     *pool_used_out = used;
     return nbest;
 }
-
 
 static void flush_tracks(live_drv *d) {
     for (int i = 0; i < GW_MAX_TRK; i++) {
@@ -164,14 +111,12 @@ static void flush_tracks(live_drv *d) {
     d->pool_used = 0;
 }
 
-static bool track_load(int drive, int trk) {
+static bool track_load_locked(int drive, int trk) {
     live_drv *d = drv_of(drive);
     if (!d || !d->pool || trk < 0 || trk >= GW_MAX_TRK) {
         return false;
     }
-    // The drive stopped since this cache was filled, so the disk in it may
-    // not be the disk it was read from. Start again rather than serve the
-    // one that has been taken out.
+
     const uint32_t rests = gw_live_rest_count(drive);
     if (d->mounted && rests != d->rests) {
         d->rests = rests;
@@ -219,16 +164,13 @@ static bool track_load(int drive, int trk) {
             }
         }
         if (!bad) {
-            break;                   // everything readable is readable
+            break;
         }
     }
 
-    // A track that will not read is remembered as empty rather than retried on
-    // every access: an unformatted track is a legitimate thing for a disk to
-    // have, and the emulator has to be told "no data" promptly.
-    d->trk[trk].loaded = true;
     if (nbest <= 0) {
         d->trk[trk].nsec = 0;
+        __atomic_store_n(&d->trk[trk].loaded, true, __ATOMIC_RELEASE);
         ets_printf("gwfdd%d: C%d H%d unreadable\n", drive + 1, cyl, head);
         return false;
     }
@@ -237,14 +179,16 @@ static bool track_load(int drive, int trk) {
                                                       MALLOC_CAP_SPIRAM);
     if (!d->trk[trk].sec) {
         d->trk[trk].nsec = 0;
+        __atomic_store_n(&d->trk[trk].loaded, true, __ATOMIC_RELEASE);
         return false;
     }
     for (int k = 0; k < nbest; k++) {
-        best[k].off += (uint32_t)d->pool_used;     // pool-absolute
+        best[k].off += (uint32_t)d->pool_used;
     }
     memcpy(d->trk[trk].sec, best, sizeof(gw_sector_t) * nbest);
     d->trk[trk].nsec = nbest;
     d->pool_used += used;
+    __atomic_store_n(&d->trk[trk].loaded, true, __ATOMIC_RELEASE);
 
     int bad = 0, odd = 0;
     for (int i = 0; i < nbest; i++) {
@@ -257,16 +201,14 @@ static bool track_load(int drive, int trk) {
                    drive + 1, cyl, head, nbest, attempts, attempts == 1 ? "" : "s", ms,
                    bad ? " - BAD CRC remains (kept as read)" : "",
                    odd ? " - mixed sector sizes" : "");
-        // A track that is not plain is worth spelling out. These are the IDs as
-        // they lie on the disk, and on a protected track they are the whole
-        // story: an image format would have had to renumber or drop them, and
-        // the CRC flag beside each is what the guest is really asking about.
+
         for (int i = 0; i < nbest; i++) {
             const gw_sector_t *p = &d->trk[trk].sec[i];
-            ets_printf("gwfdd%d:   C%u H%u R%u N%u %u bytes  data %s%s\n",
+            ets_printf("gwfdd%d:   C%u H%u R%u N%u %u bytes  data %s%s  @%uus dam+%u\n",
                        drive + 1, p->c, p->h, p->r, p->n, (unsigned)p->len,
-                       p->data_ok ? "ok" : "BAD",
-                       p->deleted ? "  (deleted mark)" : "");
+                       p->no_data ? "NONE" : p->data_ok ? "ok" : "BAD",
+                       p->deleted ? "  (deleted mark)" : "",
+                       (unsigned)p->pos_us, (unsigned)p->dam_gap);
         }
     } else {
         ets_printf("gwfdd%d: C%d H%d %d sectors, %ums%s\n", drive + 1, cyl, head,
@@ -275,61 +217,56 @@ static bool track_load(int drive, int trk) {
     return true;
 }
 
-// The FDC compares all four ID bytes, and so does this: a protected track can
-// carry a sector whose ID says it belongs somewhere else, and it is only found
-// when the guest asks for it by that ID.
+static bool track_load(int drive, int trk) {
+    return track_load_locked(drive, trk);
+}
+
 static int s_misses;
+static bool s_last_ma;
+
+static bool want_mfm_now(void) {
+    if (fdc.mf != 0xff) {
+        return (fdc.mf & 0x40) != 0;
+    }
+    return (CPU_AH & 0x40) != 0;
+}
 
 static gw_sector_t *find_sector(int drive, int trk) {
     live_drv *d = drv_of(drive);
+    s_last_ma = false;
     if (!d || !track_load(drive, trk)) {
         return nullptr;
     }
-    // The controller compares the density too: an MFM read must not be given a
-    // single-density sector, and the FM read a game uses to check which disk is
-    // in the drive must not be answered with an ordinary one.
-    const bool want_mfm = (fdc.mf != 0xff) ? ((fdc.mf & 0x40) != 0) : true;
-    const bool check_density = (fdc.mf != 0xff);
+
+    const bool want_mfm = want_mfm_now();
 
     for (int i = 0; i < d->trk[trk].nsec; i++) {
         gw_sector_t *p = &d->trk[trk].sec[i];
         if (p->c == fdc.C && p->h == fdc.H && p->r == fdc.R && p->n == fdc.N) {
-            if (check_density && (want_mfm == (p->fm != 0))) {
+            if (want_mfm == (p->fm != 0)) {
                 continue;
             }
             return p;
         }
     }
-    // How a real controller refuses matters. Told to read in one density, it
-    // searches for address marks in that density; finding none at all on the
-    // whole track is a missing address mark, and finding headers that simply do
-    // not match is no data. A protection routine can read a sector it knows is
-    // absent purely to see which of the two comes back, so the difference has
-    // to be reported rather than flattened into one error.
+
     bool any_same_density = false;
-    {
-        const bool want_mfm2 = (fdc.mf != 0xff) ? ((fdc.mf & 0x40) != 0) : true;
-        for (int i = 0; i < d->trk[trk].nsec; i++) {
-            if (fdc.mf == 0xff || want_mfm2 != (d->trk[trk].sec[i].fm != 0)) {
-                any_same_density = true;
-                break;
-            }
+    for (int i = 0; i < d->trk[trk].nsec; i++) {
+        if (want_mfm != (d->trk[trk].sec[i].fm != 0)) {
+            any_same_density = true;
+            break;
         }
     }
+    s_last_ma = !any_same_density;
     if (!any_same_density) {
         fdc.stat[fdc.us] = (UINT32)(fdc.us | (fdc.hd << 2)) | FDCRLT_IC0 | FDCRLT_MA;
     }
 
-    // Worth saying out loud, and worth saying only a few times. A guest that
-    // asks for a sector this disk does not carry gets an error back and may
-    // well go on to execute whatever it had already loaded - which is how a
-    // machine ends up resetting itself in a loop. What it asked for, against
-    // what is actually on the track, is the whole diagnosis.
     if (s_misses < 12) {
         s_misses++;
         ets_printf("gwfdd%d: MISS want C%u H%u R%u N%u %s on track %d -> %s (has %d:",
                    drive + 1, fdc.C, fdc.H, fdc.R, fdc.N,
-                   (fdc.cmd & 0x40) ? "MFM" : "FM", trk,
+                   want_mfm ? "MFM" : "FM", trk,
                    any_same_density ? "ND" : "MA", d->trk[trk].nsec);
         for (int i = 0; i < d->trk[trk].nsec && i < 12; i++) {
             ets_printf(" R%uN%u%s", d->trk[trk].sec[i].r, d->trk[trk].sec[i].n,
@@ -344,28 +281,82 @@ static inline int cur_trk(void) {
     return (fdc.treg[fdc.us] << 1) + fdc.hd;
 }
 
-// Turn what the disk said into what the FDC reports. A sector whose data CRC
-// failed is not an error to be hidden: the guest asked for it and has to be
-// told, because on a protected disk that answer is what it is checking for.
+static uint64_t s_clk64;
+static UINT32   s_clk_last;
+static uint64_t s_busy_until;
+
+static uint64_t now_clk(void) {
+    const UINT32 c = (UINT32)(CPU_CLOCK + CPU_BASECLOCK - CPU_REMCLOCK);
+    s_clk64 += (UINT32)(c - s_clk_last);
+    s_clk_last = c;
+    return s_clk64;
+}
+
+static inline uint64_t us_clk(uint32_t us) {
+    return (uint64_t)us * pccore.realclock / 1000000u;
+}
+
+static inline uint32_t byte_us(const gw_sector_t *p) {
+    const uint32_t b = (p->rev_us > 180000) ? 32 : 16;
+    return p->fm ? b * 2 : b;
+}
+
+static uint64_t until_pos(uint64_t at, uint32_t pos_us, uint32_t rev_us) {
+    const uint64_t rev = us_clk(rev_us);
+    if (!rev) {
+        return 0;
+    }
+    const uint64_t want = us_clk(pos_us) % rev;
+    return (want + rev - at % rev) % rev;
+}
+
+static uint64_t cmd_start(void) {
+    const uint64_t now = now_clk();
+    return (s_busy_until > now) ? s_busy_until : now;
+}
+
+static void cmd_done_at(uint64_t end) {
+    const uint64_t now = now_clk();
+    s_busy_until = end;
+    const uint64_t d = (end > now) ? end - now : 0;
+    fdc_int_delay = (d < 512) ? 0 : (UINT32)((d > 0x7fff0000u) ? 0x7fff0000u : d);
+}
+
+static void cmd_not_found(const gw_sector_t *any) {
+    if (any && any->rev_us) {
+        const uint64_t at = cmd_start();
+        cmd_done_at(at + until_pos(at, 0, any->rev_us) + us_clk(any->rev_us));
+    }
+}
+
+static void cmd_sector(const gw_sector_t *p) {
+    if (!p->rev_us) {
+        return;
+    }
+    const uint64_t at = cmd_start();
+    const uint32_t field = (7 + 22 + 12 + 4 + (uint32_t)p->len + 2) * byte_us(p);
+    cmd_done_at(at + until_pos(at, p->pos_us, p->rev_us) + us_clk(field));
+}
+
 static void set_status(const gw_sector_t *p) {
-    UINT8 st0 = (UINT8)(fdc.hd << 2);
+
+    UINT8 st0 = (UINT8)((fdc.hd << 2) | fdc.us);
     UINT8 st1 = 0, st2 = 0;
     UINT8 result = 0x00;
 
     if (p->deleted) {
-        st2 |= 0x40;                 // CM - control mark, deleted data
+        st2 |= 0x40;
     }
     if (!p->data_ok) {
-        st0 |= 0x40;                 // IC - abnormal termination
-        st1 |= 0x20;                 // DE - data error
-        st2 |= 0x20;                 // DD - data error in the data field
-        result = 0xa0;               // FDD BIOS: CRC error
+        st0 |= 0x40;
+        st1 |= 0x20;
+        st2 |= 0x20;
+        result = 0xb0;
     }
     fdc.stat[fdc.us] = (UINT32)st0 | ((UINT32)st1 << 8) | ((UINT32)st2 << 16);
     fddlasterror = result;
 }
 
-// ---- the backend -----------------------------------------------------------
 static void forget(int drive) {
     live_drv *d = drv_of(drive);
     if (!d) {
@@ -409,17 +400,15 @@ static BRESULT gw_seek(FDDFILE fdd) {
     return SUCCESS;
 }
 
-// Deliberately NOT fdd_seeksector_common(): that rejects any R above the
-// regular sectors-per-track, which is precisely the sector a protected disk
-// hides its check in. The ID is looked up on the real track instead.
 static BRESULT gw_seeksector(FDDFILE fdd) {
     if ((CTRL_FDMEDIA != fdd->inf.xdf.disktype) ||
         (fdc.rpm[fdc.us] != fdd->inf.xdf.rpm)) {
         fddlasterror = 0xe0;
         return FAILURE;
     }
-    if (!find_sector((int)(fdd - fddfile), cur_trk())) {
-        fddlasterror = 0xc0;         // no such sector on this track
+    const gw_sector_t *found = find_sector((int)(fdd - fddfile), cur_trk());
+    if (!found) {
+        fddlasterror = s_last_ma ? 0xe0 : 0xc0;
         return FAILURE;
     }
     return SUCCESS;
@@ -431,7 +420,17 @@ static BRESULT gw_read(FDDFILE fdd) {
     fddlasterror = 0x00;
     const gw_sector_t *p = find_sector(drive, cur_trk());
     if (!p || !d) {
-        fddlasterror = 0xc0;
+        if (d && d->trk[cur_trk()].nsec > 0) {
+            cmd_not_found(&d->trk[cur_trk()].sec[0]);
+        }
+        fddlasterror = s_last_ma ? 0xe0 : 0xc0;
+        return FAILURE;
+    }
+    cmd_sector(p);
+
+    if (p->no_data) {
+        fdc.stat[fdc.us] = (UINT32)((fdc.hd << 2) | fdc.us | 0x40) | (0x01u << 8) | (0x01u << 16);
+        fddlasterror = 0xf0;
         return FAILURE;
     }
     UINT size = (fdc.N < 8) ? (128u << fdc.N) : (128u << 8);
@@ -447,9 +446,6 @@ static BRESULT gw_read(FDDFILE fdd) {
     return SUCCESS;
 }
 
-// READ DIAGNOSTIC (uPD765 READ A TRACK) begins at index and returns the data
-// fields continuously, irrespective of the CHRN values in the command. That is
-// observably different from repeated READ DATA and is used by protected disks.
 static BRESULT gw_readdiag(FDDFILE fdd) {
     const int drive = (int)(fdd - fddfile);
     live_drv *d = drv_of(drive);
@@ -460,10 +456,40 @@ static BRESULT gw_readdiag(FDDFILE fdd) {
     }
     const bool want_mfm = (fdc.mf != 0xff) ? ((fdc.mf & 0x40) != 0) : true;
     const bool check_density = (fdc.mf != 0xff);
+
+    if (want_mfm) {
+        int bad = 0;
+        const int got = gw_live_read_diag(drive, trk >> 1, trk & 1, fdc.N, fdc.buf,
+                                          sizeof(fdc.buf), &bad);
+        if (got > 0) {
+            fdc.bufcnt = got;
+            UINT8 st0 = (UINT8)((fdc.hd << 2) | fdc.us), st1 = 0, st2 = 0;
+            fddlasterror = 0x00;
+            if (bad) {
+                st0 |= 0x40;
+                st1 |= 0x20;
+                st2 |= 0x20;
+                fddlasterror = 0xb0;
+            }
+            fdc.stat[fdc.us] = (UINT32)st0 | ((UINT32)st1 << 8) | ((UINT32)st2 << 16);
+            {
+
+                const gw_sector_t *s0 = &d->trk[trk].sec[0];
+                if (s0->rev_us) {
+                    const uint64_t at = cmd_start();
+                    const uint32_t span = (uint32_t)got * byte_us(s0) * 3 / 2;
+                    cmd_done_at(at + until_pos(at, 0, s0->rev_us)
+                                + us_clk(span < s0->rev_us ? span : s0->rev_us));
+                }
+            }
+            return SUCCESS;
+        }
+    }
+
     size_t total = 0;
     int fields = 0;
 
-    fdc.stat[fdc.us] = (UINT32)(fdc.hd << 2);
+    fdc.stat[fdc.us] = (UINT32)((fdc.hd << 2) | fdc.us);
     fddlasterror = 0x00;
     for (int i = 0; i < d->trk[trk].nsec; i++) {
         const gw_sector_t *p = &d->trk[trk].sec[i];
@@ -489,17 +515,15 @@ static BRESULT gw_readdiag(FDDFILE fdd) {
     return SUCCESS;
 }
 
-// Writes never reach the disk. The original stays exactly as it is - which is
-// the point of running from it - while the guest still sees its write take
-// effect, so saved games work for as long as the disk is mounted.
 static BRESULT gw_write(FDDFILE fdd) {
     const int drive = (int)(fdd - fddfile);
     live_drv *d = drv_of(drive);
     gw_sector_t *p = find_sector(drive, cur_trk());
     if (!p || !d) {
-        fddlasterror = 0xc0;
+        fddlasterror = s_last_ma ? 0xe0 : 0xc0;
         return FAILURE;
     }
+    cmd_sector(p);
     UINT size = (fdc.N < 8) ? (128u << fdc.N) : (128u << 8);
     if (size > p->len) {
         size = p->len;
@@ -507,15 +531,13 @@ static BRESULT gw_write(FDDFILE fdd) {
     if (size) {
         CopyMemory(d->pool + p->off, fdc.buf, size);
     }
-    p->data_ok = 1;                  // what was just written reads back clean
+    p->data_ok = 1;
     p->deleted = ((fdc.cmd & 0x09) == 0x09) ? 1 : 0;
     fddlasterror = 0x00;
-    fdc.stat[fdc.us] = (UINT32)(fdc.hd << 2);
+    fdc.stat[fdc.us] = (UINT32)((fdc.hd << 2) | fdc.us);
     return SUCCESS;
 }
 
-// Hands back the real ID fields in the order they lie on the track, which is
-// how a guest discovers a sector it could not have guessed the number of.
 static BRESULT gw_readid(FDDFILE fdd) {
     const int drive = (int)(fdd - fddfile);
     live_drv *d = drv_of(drive);
@@ -533,6 +555,31 @@ static BRESULT gw_readid(FDDFILE fdd) {
         fdc.crcn = 0;
     }
     const gw_sector_t *p = &d->trk[trk].sec[fdc.crcn++];
+
+    if (p->rev_us) {
+        const bool want_mfm = want_mfm_now();
+        const uint64_t at = cmd_start();
+        const gw_sector_t *best = nullptr;
+        uint64_t best_wait = 0;
+        for (int i = 0; i < d->trk[trk].nsec; i++) {
+            const gw_sector_t *q = &d->trk[trk].sec[i];
+            if (!q->id_ok || (want_mfm == (q->fm != 0))) {
+                continue;
+            }
+            const uint64_t w = until_pos(at, q->pos_us, q->rev_us);
+            if (!best || w < best_wait) {
+                best = q;
+                best_wait = w;
+            }
+        }
+        if (!best) {
+            cmd_not_found(p);
+            fddlasterror = 0xe0;
+            return FAILURE;
+        }
+        p = best;
+        cmd_done_at(at + best_wait + us_clk(7 * byte_us(p)));
+    }
     fdc.C = p->c;
     fdc.H = p->h;
     fdc.R = p->r;
@@ -541,10 +588,9 @@ static BRESULT gw_readid(FDDFILE fdd) {
     return SUCCESS;
 }
 
-
 static BRESULT gw_refuse(FDDFILE fdd) {
     (void)fdd;
-    fddlasterror = 0xb0;             // write protected
+    fddlasterror = 0xb0;
     return FAILURE;
 }
 
@@ -559,15 +605,12 @@ static BOOL gw_notformatting(FDDFILE fdd) {
     return FALSE;
 }
 
-// ---- what is on this disk --------------------------------------------------
-// Printed once at mount. A disk that will not boot is a good deal easier to
-// reason about when its first sector has been looked at rather than guessed at.
 static void describe_disk(int drive) {
     live_drv *d = drv_of(drive);
     if (!d || d->trk[0].nsec <= 0) {
         return;
     }
-    // The IPL is the sector the machine loads first: C0 H0 R1.
+
     const gw_sector_t *boot = nullptr;
     for (int i = 0; i < d->trk[0].nsec; i++) {
         if (d->trk[0].sec[i].r == 1) {
@@ -582,8 +625,6 @@ static void describe_disk(int drive) {
     }
     const uint8_t *b = d->pool + boot->off;
 
-    // A PC-98 FAT12 disk starts with a jump and an OEM name, then the BIOS
-    // parameter block. A game loader usually has neither.
     char oem[9];
     for (int i = 0; i < 8; i++) {
         oem[i] = (b[3 + i] >= 0x20 && b[3 + i] < 0x7f) ? (char)b[3 + i] : '.';
@@ -608,7 +649,7 @@ static void describe_disk(int drive) {
         ets_printf("gwfdd%d: not a DOS filesystem - a game loader or a raw IPL\n",
                    drive + 1);
     }
-    // The first 64 bytes, because a loader often signs itself there.
+
     for (int row = 0; row < 4; row++) {
         char txt[17];
         for (int i = 0; i < 16; i++) {
@@ -626,10 +667,7 @@ static void describe_disk(int drive) {
     }
 }
 
-// ---- mounting --------------------------------------------------------------
-// Reads cylinder 0 to find out what shape the disk is, then installs itself as
-// the backend for that drive. Drive N is served by Greaseweazle unit N.
-extern "C" bool fdd_gw_live_mount(int drv) {
+static bool mount_live(int drv) {
     live_drv *d = drv_of(drv);
     if (!d || drv >= MAX_FDDFILE) {
         return false;
@@ -658,9 +696,6 @@ extern "C" bool fdd_gw_live_mount(int drv) {
         return false;
     }
 
-    // The shape of the disk, taken from the track rather than assumed. Only the
-    // regular sectors count towards it: the odd ones are the reason this exists
-    // and must not move the geometry.
     int spt = 0;
     const int ncode = d->trk[0].sec[0].n;
     for (int i = 0; i < d->trk[0].nsec; i++) {
@@ -676,7 +711,8 @@ extern "C" bool fdd_gw_live_mount(int drv) {
     ZeroMemory(fdd, sizeof(_FDDFILE));
     fdd->type = DISKTYPE_BETA;
     fdd->ro = 1;
-    fdd->protect = 1;
+
+    fdd->protect = 0;
     fdd->inf.xdf.headersize = 0;
     fdd->inf.xdf.tracks = (UINT8)(cyls * 2);
     fdd->inf.xdf.sectors = (UINT8)spt;
@@ -684,12 +720,7 @@ extern "C" bool fdd_gw_live_mount(int drv) {
     fdd->inf.xdf.disktype = DISKTYPE_2HD;
     fdd->inf.xdf.rpm = 0;
     milstr_ncpy(fdd->fname, OEMTEXT("(GreaseWeazle live)"), NELEMENTS(fdd->fname));
-    // Written where a filename would go, so that saving the settings persists
-    // the choice and the next boot can put the physical drive back before the
-    // machine starts - without which there is no way to boot from a real disk,
-    // the only reset available restarting the whole board.
-    milstr_ncpy(np2cfg.fddfile[drv], OEMTEXT(GW_LIVE_MARK),
-                NELEMENTS(np2cfg.fddfile[drv]));
+    milstr_ncpy(np2cfg.fddfile[drv], OEMTEXT(GW_LIVE_MARK), NELEMENTS(np2cfg.fddfile[drv]));
 
     fn->eject       = gw_eject;
     fn->diskaccess  = gw_diskaccess;
@@ -715,21 +746,18 @@ extern "C" bool fdd_gw_live_mount(int drv) {
     d->cyls = cyls;
     d->spt = spt;
     d->secsize = 128 << ncode;
-    ets_printf("gwfdd%d: mounted on FDD%d - %d cyl x 2 head x %d sect x %d bytes\n",
+    ets_printf("gwfdd%d: live drive mounted on FDD%d - %d cyl x 2 head x %d sect x %d bytes\n",
                drv + 1, drv + 1, d->cyls, d->spt, d->secsize);
     describe_disk(drv);
     return true;
 }
 
-// ---- telling the guest the disk was changed --------------------------------
-// See the note above fdd_gw_live_tick(). Kept as a pulse rather than a level:
-// the guest has to see the transition, and it has to see the drive come back.
+extern "C" bool fdd_gw_live_mount(int drv) {
+    return mount_live(drv);
+}
 
-#define GW_DOOR_FRAMES 30       // about a second at the emulator's frame rate
+#define GW_DOOR_FRAMES 30
 
-// Arm the pulse. Called when a disk has been mounted, which is the one moment
-// we know for certain that the disk in the drive is not the disk that was in it
-// before.
 static void door_opened(int drive) {
     if (drive < 0 || drive >= GW_DRIVES || s_open_frames[drive] > 0) {
         return;
@@ -737,14 +765,13 @@ static void door_opened(int drive) {
     s_hidden[drive] = fddfile[drive].fname[0];
     fddfile[drive].fname[0] = 0;
     s_open_frames[drive] = GW_DOOR_FRAMES;
+
+    fdc.stat[drive] = FDCRLT_AI | FDCRLT_NR | drive;
+    fdc.us = (UINT8)drive;
+    fdc_interrupt();
     ets_printf("gwfdd%d: telling the machine the disk was changed\n", drive + 1);
 }
 
-// The disk menu is opening, and a disk can only be swapped while the machine
-// is stopped in front of it. So the cached tracks go and the guest is told the
-// door opened, whether or not anything is actually exchanged - a re-read of the
-// same disk costs a second and tells the guest nothing it did not know, while
-// missing a real swap leaves it reading a disk that is no longer in the drive.
 extern "C" void fdd_gw_live_menu_opened(void) {
     for (int d = 0; d < GW_DRIVES; d++) {
         live_drv *p = drv_of(d);
@@ -761,9 +788,10 @@ extern "C" void fdd_gw_live_menu_opened(void) {
     }
 }
 
-// Called once per frame from the emulator's own loop, which is where disk
-// access happens too - so nothing here can land in the middle of a transfer.
 extern "C" void fdd_gw_live_tick(void) {
+    if (fdc_waiting) {
+        fdc_resume();
+    }
     for (int d = 0; d < GW_DRIVES; d++) {
         live_drv *p = drv_of(d);
 
@@ -771,14 +799,18 @@ extern "C" void fdd_gw_live_tick(void) {
             continue;
         }
         if (--s_open_frames[d] == 0) {
-            fddfile[d].fname[0] = s_hidden[d];          // the door closes
+            fddfile[d].fname[0] = s_hidden[d];
+
+            if ((!(fdc.chgreg & 4)) || (fdc.ctrlreg & 0x08)) {
+                fdc.stat[d] = FDCRLT_AI | d;
+                fdc.us = (UINT8)d;
+                fdc_interrupt();
+            }
             ets_printf("gwfdd%d: drive ready again\n", d + 1);
         }
     }
 }
 
-// The start-up mounts happen before the machine is running and must not look
-// like a disk being swapped under it.
 extern "C" void fdd_gw_live_started(void) {
     s_machine_running = true;
 }
@@ -788,7 +820,6 @@ extern "C" bool fdd_gw_live_mounted(int drv) {
     return d && d->mounted;
 }
 
-// What was found on the disk, for the menu to show.
 extern "C" bool fdd_gw_live_info(int drv, int *cyls, int *spt, int *secsize) {
     const live_drv *d = drv_of(drv);
     if (!d || !d->mounted) {
@@ -800,13 +831,10 @@ extern "C" bool fdd_gw_live_info(int drv, int *cyls, int *spt, int *secsize) {
     return true;
 }
 
-// Is this saved name the live drive rather than a file?
 extern "C" bool fdd_gw_live_is_mark(const char *name) {
     return name && !milstr_cmp((const OEMCHAR *)name, OEMTEXT(GW_LIVE_MARK));
 }
 
-// How many Greaseweazles are plugged in, so the menu can offer a live drive
-// only where there is hardware for it.
 extern "C" int fdd_gw_live_available(void) {
     return gw_live_count();
 }

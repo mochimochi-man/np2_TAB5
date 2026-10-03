@@ -533,10 +533,16 @@ void pal_change(UINT8 textpalset) {
 			}
 		}
 	}
-	if (np2cfg.skipline) {
+	if (np2cfg.skipline && (gdc.mode1 & 0x10)) {	/* 200-line screens only */
 		np2_pal32[NP2PAL_TEXT].d = np2_pal32[NP2PAL_SKIP].d;
 #if defined(SUPPORT_16BPP)
 		np2_pal16[NP2PAL_TEXT] = np2_pal16[NP2PAL_SKIP];
+#endif
+	}
+	else if (np2cfg.skipline) {			/* back from 200 lines: the usual text background */
+		np2_pal32[NP2PAL_TEXT].d = np2_pal32[NP2PAL_TEXT2].d;
+#if defined(SUPPORT_16BPP)
+		np2_pal16[NP2PAL_TEXT] = np2_pal16[NP2PAL_TEXT2];
 #endif
 	}
 	scrndraw_changepalette();

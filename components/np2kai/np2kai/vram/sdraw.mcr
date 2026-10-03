@@ -333,10 +333,18 @@ const UINT8	*p;
 		}
 		q += sd_yalign;
 
-		if (sd_dirty[y+1]) {
-			for (x=0; x<sd_width; x++) {
-				SDSETPIXEL(q, p[x] + NP2PAL_SKIP);
-				q += sd_xalign;
+		if (sd_dirty[y+1] || (sdraw_interp200 && sd_dirty[y+2])) {
+			if (sdraw_interp200) {		// the line between: halfway from this one to the next
+				const UINT8 *pn = (y + 2 < SDRAW_LINES) ? p + (SURFACE_WIDTH * 2) : p;
+				for (x=0; x<sd_width; x++) {
+					SDAVGPIXEL(q, p[x] + NP2PAL_GRPH, pn[x] + NP2PAL_GRPH);
+					q += sd_xalign;
+				}
+			} else {
+				for (x=0; x<sd_width; x++) {
+					SDSETPIXEL(q, p[x] + NP2PAL_SKIP);
+					q += sd_xalign;
+				}
 			}
 			q -= sd_xbytes;
 		}
@@ -391,14 +399,28 @@ const UINT8	*q;
 		q += SURFACE_WIDTH;
 		r += sd_yalign;
 
-		if (sd_dirty[y+1]) {
-			for (x=0; x<sd_width; x++) {
-				c = q[x] >> 4;
-				if (!c) {
-					c = p[x] + NP2PALS_TXT;
+		if (sd_dirty[y+1] || (sdraw_interp200 && sd_dirty[y+2])) {
+			if (sdraw_interp200) {		// text as it is; the graphics halfway to the next line
+				const UINT8 *pn = (y + 2 < SDRAW_LINES) ? p + (SURFACE_WIDTH * 2) : p;
+				for (x=0; x<sd_width; x++) {
+					c = q[x] >> 4;
+					if (c) {
+						SDSETPIXEL(r, c + NP2PAL_TEXT);
+					}
+					else {
+						SDAVGPIXEL(r, p[x] + NP2PAL_GRPH, pn[x] + NP2PAL_GRPH);
+					}
+					r += sd_xalign;
 				}
-				SDSETPIXEL(r, c + NP2PAL_TEXT);
-				r += sd_xalign;
+			} else {
+				for (x=0; x<sd_width; x++) {
+					c = q[x] >> 4;
+					if (!c) {
+						c = p[x] + NP2PALS_TXT;
+					}
+					SDSETPIXEL(r, c + NP2PAL_TEXT);
+					r += sd_xalign;
+				}
 			}
 			r -= sd_xbytes;
 		}

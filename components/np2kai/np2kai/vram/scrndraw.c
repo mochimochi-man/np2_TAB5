@@ -88,7 +88,7 @@ static UINT8 rasterdraw(SDRAWFN sdrawfn, SDRAW sdraw, int maxy) {
 			else {
 				pal_makeanalog_lcd(pal, 0xffff);
 			}
-			if (np2cfg.skipline) {
+			if (np2cfg.skipline && (gdc.mode1 & 0x10)) {	/* 200-line screens only */
 				np2_pal32[0].d = np2_pal32[NP2PAL_SKIP].d;
 #if defined(SUPPORT_16BPP)
 				np2_pal16[0] = np2_pal16[NP2PAL_SKIP];
@@ -114,7 +114,7 @@ static UINT8 rasterdraw(SDRAWFN sdrawfn, SDRAW sdraw, int maxy) {
 		else {
 			pal_makeanalog_lcd(pal, 0xffff);
 		}
-		if (np2cfg.skipline) {
+		if (np2cfg.skipline && (gdc.mode1 & 0x10)) {	/* 200-line screens only */
 			np2_pal32[0].d = np2_pal32[NP2PAL_SKIP].d;
 #if defined(SUPPORT_16BPP)
 			np2_pal16[0] = np2_pal16[NP2PAL_SKIP];

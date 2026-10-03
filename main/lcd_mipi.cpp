@@ -89,6 +89,7 @@ extern "C" int ets_printf(const char *fmt, ...);
 #define TILES_Y (PAN_H / TILE)
 
 static uint16_t *s_fb = nullptr;  // the DPI frame buffer (PSRAM)
+static bool s_lamp_force = true;  // the access lamps need painting again
 
 // panel axis -> PC-98 axis, precomputed for the active scale mode.
 // -1 means "outside the PC-98 screen", i.e. letterbox.
@@ -230,6 +231,7 @@ static void clear_borders(void) {
     if (s_fb) {
         memset(s_fb, 0, (size_t)PAN_W * PAN_H * sizeof(uint16_t));
         fb_sync_all();
+        s_lamp_force = true;
     }
 }
 
@@ -395,6 +397,100 @@ extern "C" bool lcd_init(void) {
     return true;
 }
 
+// ---- access lamps -----------------------------------------------------------
+// FDD1, FDD2 and HDD, as the machine's front panel has them: small rectangles
+// in the margin under the picture, red for the floppies and green for the
+// hard disk. np2kai reports each access through
+// sysmng_fddaccess / sysmng_hddaccess (sdl/sysmng.h); a lamp stays lit for a
+// moment after the last one, so a single sector read is still seen to flash.
+#define LAMP_HOLD_US 80000
+static volatile int64_t s_lamp_at[3];
+static int  s_lamp_drawn = -1;          // lamps last painted, -1 = nothing there
+
+extern "C" void np2lamp_fdd(REG8 drv) {
+    if (drv < 2) {
+        s_lamp_at[drv] = esp_timer_get_time();
+    }
+}
+
+extern "C" void np2lamp_hdd(REG8 drv) {
+    (void)drv;
+    s_lamp_at[2] = esp_timer_get_time();
+}
+
+// A rectangle in screen coordinates as the picture is seen - x 0..1279 left to
+// right, y 0..719 top to bottom - through the same turn the blit applies.
+static void lamp_rect(int lx0, int ly0, int w, int h, uint16_t c) {
+    for (int lx = lx0; lx < lx0 + w; lx++) {
+        const int panel_y = FLIP_H ? (PAN_H - 1 - lx) : lx;
+        uint16_t *row = s_fb + (size_t)panel_y * PAN_W;
+        for (int ly = ly0; ly < ly0 + h; ly++) {
+            row[FLIP_V ? (PAN_W - 1 - ly) : ly] = c;
+        }
+    }
+}
+
+#define LAMP_W   40
+#define LAMP_H   6
+#define LAMP_GAP 8
+
+static bool s_lamps_on = true;          // the menu's switch
+
+extern "C" void lcd_lamps_enable(bool on) {
+    s_lamps_on = on;
+    s_lamp_force = true;
+}
+
+extern "C" bool lcd_lamps_enabled(void) {
+    return s_lamps_on;
+}
+
+// Once a frame, from the emulator loop: repaint the lamps that changed. They
+// sit in a row under the picture, FDD1 FDD2 HDD from the left, the row's right
+// end under the picture's right edge - wherever the scale mode puts it.
+extern "C" void lcd_lamps_tick(void) {
+    if (!s_fb) {
+        return;
+    }
+    const int64_t now = esp_timer_get_time();
+    int on = 0;
+    for (int i = 0; i < 3; i++) {
+        if (s_lamp_at[i] && now - s_lamp_at[i] < LAMP_HOLD_US) {
+            on |= 1 << i;
+        }
+    }
+    if (!s_lamps_on) {
+        on = -2;                        // drawn as nothing at all
+    }
+    if (on == s_lamp_drawn && !s_lamp_force) {
+        return;
+    }
+    const int num = (s_scale_mode == BRD_SCALE_DOT) ? 1 : BRD_FIT_NUM;
+    const int den = (s_scale_mode == BRD_SCALE_DOT) ? 1 : BRD_FIT_DEN;
+    const int pic_w = PC98_W * num / den;               // along the screen's width
+    const int pic_h = PC98_H * num / den;
+    const int right = (PAN_H + pic_w) / 2;              // just past the picture
+    const int below = (PAN_W + pic_h) / 2;
+    const int lx0 = right - (3 * LAMP_W + 2 * LAMP_GAP);
+    int ly0 = below + 2;
+    if (ly0 + LAMP_H > PAN_W) {
+        ly0 = PAN_W - LAMP_H;
+    }
+    static const uint16_t lit[3] = {0xF800, 0xF800, 0x07E0};   // red, red, green
+    static const uint16_t dark[3] = {0x3000, 0x3000, 0x0180};
+    for (int i = 0; i < 3; i++) {
+        const uint16_t c = (on < 0) ? 0x0000 : (on & (1 << i)) ? lit[i] : dark[i];
+        lamp_rect(lx0 + i * (LAMP_W + LAMP_GAP), ly0, LAMP_W, LAMP_H, c);
+    }
+    // The lamps' panel rows, written back for the scanout.
+    const int span = 3 * LAMP_W + 2 * LAMP_GAP;
+    const int y0 = FLIP_H ? (PAN_H - lx0 - span) : lx0;
+    esp_cache_msync(s_fb + (size_t)y0 * PAN_W, (size_t)span * PAN_W * sizeof(uint16_t),
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    s_lamp_drawn = on;
+    s_lamp_force = false;
+}
+
 // ---- disk-menu text UI ----------------------------------------------------
 // Glyphs come from the CGROM the emulator loaded from FONT.ROM (8x16 ANK cells
 // at 0x80000), the same source the S3 forks use — no second font.
@@ -421,6 +517,7 @@ extern "C" void lcd_menu_clear(void) {
     if (s_fb) {
         memset(s_fb, 0, (size_t)PAN_W * PAN_H * sizeof(uint16_t));
         s_menu_dirty = true;
+        s_lamp_force = true;             // painted over: put them back after
     }
     s_force_full = true;  // the panel no longer matches the per-tile hashes
 }

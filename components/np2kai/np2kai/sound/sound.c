@@ -399,6 +399,18 @@ void sound_sync(void)
 
 static volatile int locks = 0;
 
+/* Samples already rendered into the stream and waiting to be taken. The chips
+   render as the emulated machine runs, at their own idea of the rate; a host
+   that takes blocks on a clock of its own has to watch this as well, or what
+   it does not take in time overflows the reserve and is thrown away. */
+UINT sound_pending(void) {
+
+	if (sndstream.buffer == NULL) {
+		return 0;
+	}
+	return sndstream.samples + sndstream.reserve - sndstream.remain;
+}
+
 const SINT32 *sound_pcmlock(void) {
 
 const SINT32 *ret;

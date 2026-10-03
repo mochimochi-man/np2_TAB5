@@ -383,7 +383,7 @@ BRESULT fdd_read_nfd(FDDFILE fdd) {
 //	変更(kaiD)
 //	fddlasterror = 0x00;
 	//	イメージ内情報のREAD DATA(FDDBIOS)の結果を反映
-	fdc.stat[fdc.us] = fdd->inf.nfd.head.r0.si[trk][secR].byST0 + (fdd->inf.nfd.head.r0.si[trk][secR].byST1 *256) + (fdd->inf.nfd.head.r0.si[trk][secR].byST2 * 256 * 256);
+	fdc.stat[fdc.us] = ((fdd->inf.nfd.head.r0.si[trk][secR].byST0 & 0xf8) | (fdc.hd << 2) | fdc.us) + (fdd->inf.nfd.head.r0.si[trk][secR].byST1 *256) + (fdd->inf.nfd.head.r0.si[trk][secR].byST2 * 256 * 256);
 	fddlasterror = fdd->inf.nfd.head.r0.si[trk][secR].byStatus;
 	TRACEOUT(("NFD(r0) read FDC Result Status[%02x],STS0[%02x],STS1[%02x],STS2[%02x]",
 			fdd->inf.nfd.head.r0.si[trk][secR].byStatus,
@@ -819,7 +819,7 @@ BRESULT fdd_read_nfd1(FDDFILE fdd) {
 	file_close(hdl);
 
 	//	イメージ内情報のREAD DATA RESULTを反映
-	fdc.stat[fdc.us] = sec_id.bySTS0 | (sec_id.bySTS1 << 8) | (sec_id.bySTS2 << 16);
+	fdc.stat[fdc.us] = ((sec_id.bySTS0 & 0xf8) | (fdc.hd << 2) | fdc.us) | (sec_id.bySTS1 << 8) | (sec_id.bySTS2 << 16);
 	fddlasterror = sec_id.byStatus;
 	fdc.bufcnt = secsize;
 	TRACEOUT(("NFD(r1) read FDC Result Status[%02x],STS0[%02x],STS1[%02x],STS2[%02x]",
